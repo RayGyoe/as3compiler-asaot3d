@@ -29,6 +29,19 @@ three.js 是 **MIT**，借鉴/移植只需保留版权声明。
 | `three-src/` | three.js 浅克隆（r187，commit `a1ca74b`），供 borrow-map 指出处 | — |
 | `tools/build-demo.sh` | 双后端构建实现（AOT / AIR），被 `apps/<demo>/build.sh` 转发调用 | — |
 
+> `three-src/` **不入库**（免内嵌嵌套 `.git`，见 `.gitignore`），克隆本仓库后需要自己重建；
+> borrow-map 的所有行号以这棵稀疏树为准：
+>
+> ```bash
+> git clone --filter=blob:none --no-checkout \
+>   https://github.com/mrdoob/three.js.git three-src
+> git -C three-src sparse-checkout set src
+> git -C three-src checkout a1ca74b
+> ```
+>
+> 重建后 `three-src/src/` 应有 757 个 `.js`；重建不了也不影响构建与测试（它只是出处索引），
+> 只有核对 borrow-map 行号时才需要。
+>
 > 命名沿用 asaotui 的约定：顶层命名空间 `asaot`，`ui` 与 `three` 是两个并列库。
 >
 > `seam/` 与 `kit/` 是**共享源码根**，不再往每个 `apps/<demo>/src/` 里复制库文件：每个 demo 的
