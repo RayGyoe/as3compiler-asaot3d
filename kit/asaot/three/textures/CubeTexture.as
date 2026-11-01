@@ -24,10 +24,20 @@ package asaot.three.textures
 
         // M25/D154: radiance divisor of a bake produced by
         // EquirectangularToCube. The faces are 8-bit gamma-encoded LINEAR
-        // radiance (there is no float texture format on this backend), so the
-        // renderer multiplies the environment contribution by this scalar to get
-        // the original HDR values back. 1.0 for an LDR cube (CubeTextureLoader),
-        // which is what keeps the M9 path byte-identical.
+        // radiance -- a cube has no float storage at any profile rung: a
+        // `rgbaHalfFloat` cube is ACCEPTED by createCubeTexture and by
+        // uploadFromBitmapData but stores the same 8-bit bytes as `bgra`
+        // (measured, three-api-design.md §36.2), so the renderer multiplies the
+        // environment contribution by this scalar to get the original HDR values
+        // back. 1.0 for an LDR cube (CubeTextureLoader), which is what keeps the
+        // M9 path byte-identical.
+        //
+        // The same measurement settles a design question for this class: one cube
+        // with a mip chain per roughness level is NOT available either --
+        // uploadFromBitmapData accepts `miplevel > 0` and then drops it (§36.3), so
+        // a per-roughness mip ladder would silently collapse into the sharp level.
+        // That is why the M25-R1 ladder is six CubeTextures (PrefilteredEnvironment)
+        // rather than one cube with six mips.
         public var hdrScale:Number;
 
         public function CubeTexture(images:Vector.<BitmapData> = null)

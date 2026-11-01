@@ -9,11 +9,17 @@
 //
 // DIVERGENCES (three-api-design.md 33):
 //   D167  the payload is HDRImage (RGBE bytes, decoded on demand), NOT the float
-//         DataTexture three.js builds. This backend has no float texture format
-//         at all, and the only consumer is EquirectangularToCube, whose output is
-//         8-bit cube faces -- so half-float precision would be quantised away
-//         three stages later while costing 48 MB per 2K panorama today. EXR
-//         samples are converted to the same RGBE quadruples .hdr produces.
+//         DataTexture three.js builds. The only consumer is
+//         EquirectangularToCube, whose output is 8-bit cube faces, and a cube
+//         texture has no float storage here at any rung (a `rgbaHalfFloat` cube
+//         accepts the upload but stores 8-bit bytes -- measured, 
+//         three-api-design.md §36.2). RGBA_HALF_FLOAT 2D textures and render
+//         targets DO exist at the opt-in `standard` rung (ASC_S3D_HALF_TEXTURES),
+//         so a float 2D panorama is possible in principle -- but it would still
+//         be quantised away by the cube bake three stages later while costing
+//         48 MB per 2K panorama today, because this engine's HDR path has no
+//         float consumer downstream. EXR samples are converted to the same RGBE
+//         quadruples .hdr produces.
 //   D168  compression: NONE (0) and RLE (1) are decoded; ZIP/ZIPS/PIZ/PXR24/
 //         B44/B44A/DWAA/DWAB are REFUSED BY NAME with the code in the message.
 //         Those schemes need zlib or a proprietary predictor, i.e. an inflate

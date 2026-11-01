@@ -9,10 +9,14 @@
 //   * getBoneByName() and pose() (reset every bone to its bind pose).
 //
 // DIVERGENCES:
-//   D85  `boneTexture`/`computeBoneTexture()` is not borrowed: Stage3D has no
-//        float texture format, so the palette cannot be uploaded as a texture
-//        (and AGAL1 has no relative constant addressing to index a vc array).
-//        See D84 for the CPU skinning consequence.
+//   D85  `boneTexture`/`computeBoneTexture()` is not borrowed: relative constant
+//        addressing (`vc[a0.x]`) does not exist in this translator, and the only
+//        float palette storage Stage3D exposes here is RGBA_HALF_FLOAT at the
+//        opt-in `standard` rung -- 16-bit, so a bind-pose translation of tens of
+//        units lands ~5e-4 off, and the palette would take sampler units away
+//        from the material maps. Vertex texture fetch itself is NOT the blocker
+//        (`tld`/`vsN` now works on AIR and on the native Metal backend, §36.4);
+//        the storage and its precision are. See D84 and three-api-design.md §36.
 //   D86  boneMatrices is a Vector.<Number>, not a Float32Array (D67).
 package asaot.three.objects
 {

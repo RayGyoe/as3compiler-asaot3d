@@ -2,11 +2,17 @@
 //
 // Borrows the DATA SHAPE of three.js src/loaders/RGBELoader.js (r187) rather
 // than its DataTexture wrapper: three.js hands the decoded floats to a
-// `DataTexture` with `type = HalfFloatType`; this backend has no float texture
-// format at all (Material.`stage3d_glue.mm` only ever allocates BGRA8, and
-// `Context3DTextureFormat` has no half-float member), so the panorama has to
-// stay on the CPU and be baked into 8-bit cube faces (EquirectangularToCube).
-// That is the M25 decision D152 in three-api-design.md 30.
+// `DataTexture` with `type = HalfFloatType`. The panorama cannot do that here
+// because the DEFAULT build reports `baselineExtended`, whose format set has no
+// usable float format (createTexture('rgbaHalfFloat') answers #3759), and more
+// importantly because a float CUBE is not available at any rung: a
+// `rgbaHalfFloat` cube accepts the upload but stores the same 8-bit bytes
+// (measured, `probes/fmt-vtf-m28` A5). The opt-in `standard` rung
+// (ASC_S3D_HALF_TEXTURES) does allocate RGBA_HALF_FLOAT 2D textures and render
+// targets and preserves values above 1.0 -- but that only helps a 2D HDR
+// offscreen pass, never the environment cube, so the panorama stays on the CPU
+// and is baked into 8-bit cube faces (EquirectangularToCube). That is the M25
+// decision D152 in three-api-design.md 30; the measurement table is 36.
 //
 // Storage is the RGBe quadruple as read from the file (one byte per channel,
 // i.e. four bytes per texel), NOT floats: a 2048x1024 panorama is 2M texels, and

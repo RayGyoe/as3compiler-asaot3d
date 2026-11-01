@@ -13,7 +13,11 @@
 //
 // DIVERGENCES (three-api-design.md 30):
 //   D152  the payload is HDRImage (RGBe bytes + on-demand decode), not a float
-//         DataTexture -- this backend has no float texture format.
+//         DataTexture: this engine bakes the panorama into 8-bit cube faces, and
+//         a cube has no float storage at any profile rung (three-api-design.md
+//         §36.2). The default build additionally has no float 2D format either
+//         (#3759 at baselineExtended); only the opt-in `standard` rung
+//         (ASC_S3D_HALF_TEXTURES) allocates RGBA_HALF_FLOAT.
 //   D153  `32-bit_rle_xyze` (CIE XYZ) is REFUSED by name instead of decoded as
 //         RGB. Radiance allows it; three.js silently mis-reads such files as
 //         RGB, which is the "compiles but the colours are wrong" failure mode

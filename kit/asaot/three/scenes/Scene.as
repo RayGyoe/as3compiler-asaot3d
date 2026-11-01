@@ -54,10 +54,13 @@ package asaot.three.scenes
 
         // three.js Scene.backgroundBlurriness (Scene.js:78): 0 = sharp, 1 = fully
         // blurred. three.js reaches it by sampling a PMREM (prefiltered) chain at
-        // a fixed roughness; this backend has no float targets and no explicit-LOD
-        // cube sampling, so M25 approximates it with a small cone of taps in the
-        // skybox program (D156) -- an approximation that is documented, not
-        // silent.
+        // a fixed roughness; this backend has no explicit-LOD cube sampling (AGAL
+        // `tex` has no LOD operand and `tld` is vertex-stage only), so a mip
+        // ladder could not be addressed even if one existed. M25 therefore
+        // approximates the blur with a small cone of taps in the skybox program
+        // (D156) -- an approximation that is documented, not silent. Float render
+        // targets are NOT the reason: the opt-in `standard` rung has them
+        // (three-api-design.md 36.1); the missing piece is per-fragment LOD.
         public var backgroundBlurriness:Number = 0.0;
 
         public var isScene:Boolean = true;

@@ -2,11 +2,14 @@
 //
 // three.js does this on the GPU: WebGLCubeRenderTarget.fromEquirectangularTexture
 // renders a box from the inside with the `equirect` shader chunk and lets the
-// cube framebuffer's mip chain stand in for a PMREM. This backend has no float
-// render target (stage3d_glue.mm only allocates BGRA8 -- see M25/D152), so the
-// conversion runs on the CPU at load time and the result is a plain 6-face
-// CubeTexture. That is the same split the kit already uses for CPU skinning
-// (M12/D84) and CPU mip chains (M17).
+// cube framebuffer's mip chain stand in for a PMREM. Here the conversion runs on
+// the CPU at load time and the result is a plain 6-face CubeTexture. The reason
+// is the CUBE, not float support: a cube texture has no float storage at any
+// profile rung -- `rgbaHalfFloat` cubes are accepted and then store 8-bit bytes
+// (measured, three-api-design.md §36.2) -- and per-roughness mip levels cannot
+// be uploaded either (uploadFromBitmapData drops miplevel > 0, §36.3), so the
+// GPU path three.js uses has no destination here. That is the same split the kit
+// already uses for CPU skinning (M12/D84) and CPU mip chains (M17).
 //
 // TWO CONVENTIONS HAVE TO MATCH THE SAMPLER, so they are published here and
 // pinned by probes/hdr-smoke-m25 rather than buried:

@@ -28,17 +28,16 @@
 // shadow pass -- six of the sixteen AGAL2 sampler slots.
 //
 // M9 (image-based lighting) adds the seventh: fs7, a CUBE sampler holding the
-// environment map (`material.envMap || scene.environment`). It is sampled twice
-// by the standard fragment -- once at the reflection direction R for specular
-// radiance, once at the shading normal N for diffuse irradiance. No PMREM
-// pre-filtering exists in this backend (no float render targets, so no mip
-// chain of pre-convolved radiance), so the two features a pre-filtered env map
-// would supply are approximated instead: roughness blends R toward N by
-// roughness^2 (what three.js does on top of the prefilter), and the specular
-// energy split uses Karis's analytic EnvBRDFApprox rather than sampling a DFG
-// LUT texture (three.js reads BRDF_LUT; the analytic form saves a sampler and
-// ~8 bytes of constant upload per draw). Both approximations are recorded in
-// three-api-design.md D48.
+// environment map (`material.envMap || scene.environment`). The two features a
+// PMREM would supply are approximated instead, because AGAL exposes no LOD-scaled
+// cube fetch in a FRAGMENT program (`tex` has no LOD operand; `tld` is
+// vertex-stage only) and a cube has no float/mip storage here at any profile rung
+// (three-api-design.md §36.2/.3). So: roughness blends R toward N by roughness^2
+// (what three.js does on top of the prefilter), a prefiltered ladder picks a
+// whole cube per draw (M25-R1/D174), and the specular energy split uses Karis's
+// analytic EnvBRDFApprox rather than sampling a DFG LUT texture (three.js reads
+// BRDF_LUT; the analytic form saves a sampler and ~8 bytes of constant upload
+// per draw). Both approximations are recorded in three-api-design.md D48.
 //
 // R8 (normal mapping): AGAL has no derivative opcodes in profile 1, but AGAL2
 // does (ddx/ddy, assembler OP_VERSION2; the translator emits dfdx/dfdy for
@@ -1935,6 +1934,14 @@ package asaot.three
             // Depth programs sample nothing: clear the slots the main pass left
             // bound before the first shadow draw (AIR #3697).
             this._unbindAllSamplers();
+            // Mask 3 = COLOR|DEPTH, no STENCIL. That is safe ONLY because nothing
+            // reads this target back: with `enableDepthAndStencil` on (the flag is
+            // required here -- it is also what enables depth testing), AIR throws
+            // #3692 from drawToBitmapData if the clear that produced the frame
+            // left stencil out of its mask (measured on adl 51.4.1 with a
+            // depthAndStencil context). The main pass re-enables the back buffer
+            // and clears with the 4-argument overload (mask ALL) before any
+            // readback, which is what keeps this frame clear covered today.
             this._context.clear(1, 1, 1, 1, 1.0, 0, 3);
             this._context.setDepthTest(true, 'lessEqual');
             this._context.setCulling('front');
@@ -5406,10 +5413,14 @@ package asaot.three
             // three.js getIBLRadiance (envmap_physical_pars_fragment.glsl.js:116):
             //   R = normalize( mix( reflect(-V, N), N, roughness^2 ) )
             //   radiance = textureCubeUV(envMap, R, roughness) * envMapIntensity
-            // textureCubeUV reads a PMREM mip chain; this backend has no float
-            // render targets to build one, so the roughness cue is the mix toward
-            // N only (D48). The energy split uses Karis's EnvBRDFApprox instead of
-            // sampling three.js's BRDF_LUT (same reasoning, one less sampler).
+            // textureCubeUV reads a PMREM mip chain; this backend has no LOD-scaled
+            // cube fetch in a fragment program (`tex` takes no LOD operand and
+            // `tld` is vertex-stage only) and no float/mip cube storage
+            // (three-api-design.md §36.2/.3), so the roughness cue is the mix
+            // toward N, or -- when a prefiltered ladder is bound -- a whole
+            // roughness-matched cube (M25-R1/D174). The energy split uses Karis's
+            // EnvBRDFApprox instead of sampling three.js's BRDF_LUT (same
+            // reasoning, one less sampler).
             //
             // Registers at entry: ft0 = N, ft1 = V, ft3.y = dotNV, ft4 = color,
             // ft5.x = roughness, ft6 = specularColorBlended, ft9.y/.z = AB (from

@@ -723,7 +723,7 @@ three.js 的 morph 与 skinning 都在**顶点着色器**里做：
 
 | # | 形态 | 我们落地 | 为什么 |
 |---|---|---|---|
-| D84 | morph + skinning 在 GPU，零 CPU 成本 | CPU 逐顶点：morph 先、skinning 后（与 three.js 的 chunk 顺序一致），结果写回属性 | 见上：无相对常量寻址、无 float 纹理。代价是每帧 `O(顶点数 × 影响数)`；M12 demo 的鞭子 330 顶点 × 4 影响 = 1320 次矩阵-向量乘，单帧约 0.1 ms 量级，可接受。**大规模角色（5 万顶点）会明显变慢**，这条限制登记在 §17.8 |
+| D84 | morph + skinning 在 GPU，零 CPU 成本 | CPU 逐顶点：morph 先、skinning 后（与 three.js 的 chunk 顺序一致），结果写回属性 | 见上：无相对常量寻址；骨矩阵贴图只能落在 `RGBA_HALF_FLOAT`（16F，且仅 opt-in `standard` 档）上，精度不足（§36）。代价是每帧 `O(顶点数 × 影响数)`；M12 demo 的鞭子 330 顶点 × 4 影响 = 1320 次矩阵-向量乘，单帧约 0.1 ms 量级，可接受。**大规模角色（5 万顶点）会明显变慢**，这条限制登记在 §17.8 |
 | D85 | `Skeleton.boneTexture` + `computeBoneTexture()`（把调色板烘成 DataTexture 供着色器采样） | **不借**（`boneTexture` 字段与 `computeBoneTexture` 都不存在） | 没有 float 纹理，烘了也采不了；留一个字段会让人以为 GPU 路径可用 |
 | D86 | `boneMatrices` 是 `Float32Array` | `Vector.<Number>` | 同 D67 |
 | R22 | 渲染器在 `renderObject` 里按对象逐帧 `mesh.updateDeform(frameId)` | `AGALRenderer._frameId` 每帧自增；`updateDeform` 用 `_deformFrame` 去重 | 同一帧里阴影 prepass 与主 pass 都会碰同一个 mesh，没去重就白算两遍（且 prepass 必须拿到**已摆好姿势**的顶点，否则阴影是绑定姿态的）。放在 `position.version` 检查**之前**，重传自然带上本帧形变 |
@@ -2308,8 +2308,9 @@ R47 让「两个常量源操作数」在装配期就被消解，但还有一类�
 
 **顺带澄清两个不是原因的假设**：
 
-- **HDR**：AOT 的 Metal glue 全程 `MTLPixelFormatBGRA8Unorm`（颜色附件、RTT、cube、几何缓冲
-  上传都是 8 位），**从来没有 float 渲染目标**（§24.9 的「无 float RT 故无 PMREM」同源）。
+- **HDR**：本构建的默认档位（`baselineExtended`）里 AOT 的颜色附件、RTT、cube 与几何缓冲上传
+  全程 `MTLPixelFormatBGRA8Unorm`，**没有 float 渲染目标**；float RT 只在 opt-in 的 `standard`
+  档（`ASC_S3D_HALF_TEXTURES`）出现，而 cube 在任何档位都没有 float 存储（实测 §36.2）。
   所以不存在「AOT 有 HDR、为 AIR 降级」这回事；色调映射本来就是在 8 位目标上做的。
 - **AGAL 版本**：v2 → v4 只抬高寄存器与指令上限（`vc` 249 / `fc` 199 / `vt`·`ft` 25），
   不改变任何一条指令的算术或精度，画面上不可见。
@@ -2909,13 +2910,16 @@ LSB 被放大成「AOT 高光核是一片饱和白、`adl` 是一条细亮带」
 
 M9 的 IBL 只吃**已编码的 8 位 cube**（`CubeTextureLoader` 六张 JPEG），而 three.js 的
 `RGBELoader`/PMREM 路线是「float panorama → 预滤波 cube」。本后端的硬边界是
-**没有 float render target、没有 float 纹理**（Stage3D/Metal glue 只有 BGRA8），于是 M25 把整条
-链路搬到 CPU：解码 → 重投影 → 8 位编码 → 上传，运行时只做「解码 + 乘系数 + 色调映射」。
+**环境 cube 没有 float 存储**（任何档位：`rgbaHalfFloat` cube 接受上传但存 8 位字节，实测
+§36.2），且默认档也没有 float render target（`standard` 档才有，§36.1），于是 M25 把整条链路
+搬到 CPU：解码 → 重投影 → 8 位编码 → 上传，运行时只做「解码 + 乘系数 + 色调映射」。
 
 ### 30.1 D152：不用 PMREM，用 CPU 等距柱状→立方体烘焙
 
 - 输入是 Radiance `.hdr`（RGBE），输出六张正方 `BitmapData`，逐面逐像素按方向取全景。
-- 为什么不上 GPU：`setRenderToTexture` 只能给 8 位格式；float RT 缺席时「预滤波」只剩 CPU 一条路。
+- 为什么不上 GPU：目标 cube 没有 float 存储（§36.2），`setRenderToTexture` 到 cube 也拿不到
+  16F；而预滤波的语义又需要按粗糙度选 LOD，AGAL 片段程序没有 LOD 操作数（§36.6）。两条
+  都堵死，才落到 CPU。
 - 代价与取舍：面尺寸由调用方定（demo 用 128），时间在 4–17 ms（512×256 全景、单线程）；粗糙度的
   多级预滤波**不做**（见 30.5），所以反射的锐度由材质粗糙度在片元里近似，而不是查 LOD。
 
@@ -3742,3 +3746,106 @@ demo 在 `updateFrame` 里每帧调一次，**第 0 档就是清晰 cube**，环
 - 阶梯烘焙是**单线程**的（`PrefilterJob` 只解决分帧，不解决并行）。
 - 探针与环境的 `fs7` 冲突只有「警告 + 忽略探针」，没有第二套混合方案。
 - D179（`adl` 下 cube 背景不画）待定位。
+
+## 36. 能力面实测：`Context3DTextureFormat` / profile / 顶点纹理取值（2026-11-02）
+
+这一节回答的不是「编译器能不能编」，而是「**引擎今天能用到什么**」。做法不靠读编译器文档，
+也不靠 AIR 文档推断：写一支无窗口 Stage3D 探针，用 asaot3d 真实的调用方式在 **AOT/Metal**
+与 **AIR/adl 51.4.1** 上各跑一遍，逐项读回像素。
+
+探针：`probes/fmt-vtf-m28/{probe.as, air/VtfAir.as}`（清单带 `ASC_S3D_HALF_TEXTURES=1`）。
+复现：
+
+```bash
+cd asaot3d/probes/fmt-vtf-m28 && node ../../../as3compiler/src/index.ts probe.as \
+  ../../seam/com/adobe/utils/AGALMiniAssembler.as --manifest probe.build.json \
+  -o ../../temp/fmt-vtf-m28 --run
+cd air && adl VtfAir-app.xml      # adl 的 trace 不回显，结果写 air-out.txt
+```
+
+### 36.1 profile：AOT 不跟随请求，AIR 跟随
+
+```
+AOT  requestContext3D("auto","enhanced") -> profile = baselineExtended
+AIR  requestContext3D("auto","enhanced") -> driver = OpenGL (Enhanced), profile = enhanced
+```
+
+后果不是「少一个字符串」，而是**半浮点渲染目标被档位门挡住**：
+
+```
+createTexture(4,4,"rgbaHalfFloat")  AOT(baselineExtended) -> #3759
+                                    AIR(enhanced)        -> ok
+```
+
+带 `ASC_S3D_HALF_TEXTURES=1` 重编后，AOT 认领 `standard`，`rgbaHalfFloat` 渲染目标**真的保住 2.0**：
+
+```
+clear(2.0) -> 取样 ×0.25    BGRA8  rt -> 0x404040（钳到 1.0）
+                            half   rt -> 0x808080（保住 2.0）
+```
+
+⚠️ 这条**没有**改：认领 `enhanced` 需要同时具备 MRT + 浮点纹理 + VTF，缺一即谎报
+（AGENTS.md §1.5）。当前构建只到 `standard`，`profile` 就只报 `standard`。**不要**为了让
+`rgbaHalfFloat` 可用去改 `profile` 声明 —— 改成先补齐 MRT。
+
+### 36.2 格式对 2D / 渲染目标有效，对 cube 无效
+
+| 格式 | 2D `createTexture` | 渲染目标 | cube |
+|---|---|---|---|
+| `bgra` | ok | ok（8 位钳制） | ok |
+| `bgrPacked565` / `bgraPacked4444` | ok（CPU 解包成 8 位） | ok | **接受但按 8 位内存布局** |
+| `rgbaHalfFloat` | `standard` 档 ok，默认档 `#3759` | `standard` 档保 2.0 | **接受，但存的是同样那批 8 位字节** |
+| `compressed` / `compressedAlpha` | 4×4 起 | `#3746` | 未测 |
+
+实测关键一条：`rgbaHalfFloat` cube 的取样结果**逐位等于** `bgra` cube（`0xFF0000`）。
+所以「用半浮点 cube 装真 HDR 环境」这条路在本运行时是假的 —— 引擎仍走 D154 的
+8 位 sRGB 编码 + `hdrScale` 还原。这也是 M25 的 CPU 烘焙取舍在今天仍然成立的真正原因，
+而**不是**「后端没有浮点纹理」（这句话在 `standard` 档是错的，本轮已全仓修正）。
+
+### 36.3 cube 的 mip 上传被静默丢弃
+
+`uploadFromBitmapData(bd, side, miplevel=1)` 既不抛也不报，且**不改动 level 0**。
+⇒ 「一个 cube + 6 级 mip 代替六个 cube 阶梯」在 asaot3d 走不通，M25-R1 的
+`PrefilteredEnvironment`（六个独立 `CubeTexture`）是唯一可行形态。改回 mip 方案前先看这条。
+
+### 36.4 顶点纹理取值（VTF）：AIR 可用，AOT 已打通（Metal）
+
+AGAL 的顶点阶段取值是 `tld` + `vsN`（`TLD` 在 Adobe 汇编器里是 `OP_VERT_ONLY`），不是 `tex`
+（`OP_FRAG_ONLY`，汇编期即报 `only allowed in fragment programs`）。
+
+**本轮开工时的实测**（同一支探针）：
+
+```
+AIR: tld/vs0  assemble ok -> upload ok -> draw ok -> readback=0xFF00   ← 真取到绿色
+AOT: tld/vs0  upload ok   -> draw 抛 Error id=0 msg=null               ← 无任何诊断
+```
+
+按 AGENTS.md §1.5 判据（`adl` 能跑对而我们跑不出）这是**遗留缺陷**。该缺陷已由编译器侧
+补齐并入库（`as3compiler` `5d92d93` "AGAL4 vertex texture fetch ('tld' in a vertex program)"），
+用同一支探针重跑：
+
+```
+AOT/Metal: tld/vs0 -> draw ok -> readback=0xFF00                        ← 与 AIR 一致
+```
+
+⇒ **AOT/Metal 与 AIR 都能取值**。仍待确认：D3D12 / WebGL 两个后端（本机无法实测，不写成
+「已通过」）、顶点侧 sampler flags 是否随 `tld` 的 `<2d,nearest,clamp>` 生效、以及失败时的
+错误文案（`msg=null` 是两段翻译共用一个静态 `as_agal_errmsg` 导致：顶点程序翻译失败后被
+片元程序的成功翻译清空）。`SkinnedMesh`/`Skeleton` 的 D84/D85 因此已改写为「卡在**存储与
+精度**（骨矩阵只有 16F 且仅 `standard` 档），不是卡在取值」。
+
+### 36.5 附带测到：`depthAndStencil` 与 `clear` 掩码
+
+`configureBackBuffer(..., depthAndStencil=true, ...)` 时，若产生该帧的 `clear()` 掩码里没有
+STENCIL，`drawToBitmapData()` 抛 `#3692`（本探针用 `mask=3` 时撞上，改 `7` 才好）。
+引擎主 pass 用 4 参重载（掩码 ALL），所以不受影响；阴影 prepass 的 `mask=3` 已在
+`AGALRenderer` 就地注明依赖关系（那里从不回读）。
+
+### 36.6 对 asaot3d 路线的结论
+
+- **HDR 离屏（bloom / 后处理）**：值得做，但前置是 profile 抬到 `standard`（含 MRT）。
+- **PMREM / cube LOD**：与这两项都无关，永远不行（AGAL 无片段 LOD 操作数）——
+  M25-R1 阶梯路线是对的，不要回头重构。
+- **半浮点 cube**：不做。收益被 8 位输出和 `hdrScale` 完全吃掉。
+- **GPU 蒙皮**：VTF 已在 AOT/Metal 与 AIR 打通（§36.4），剩下的前置只剩**精度实验**
+  （16F 骨矩阵在绑定姿态位移数十单位时 ~5e-4 相对误差）与采样槽竞争。先量，再决定。

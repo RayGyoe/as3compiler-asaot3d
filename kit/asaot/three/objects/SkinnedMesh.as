@@ -8,20 +8,33 @@
 //                            out  = bindMatrixInverse * sum_j w_j * (boneWorld_j * boneInverse_j) * base;
 //     which is exactly what skinning_vertex.glsl.js computes on the GPU.
 //
-// DEFORMATION STRATEGY (D84, three-core plan §17.4):
-//   GPU skinning needs either relative constant addressing (`vc[a0.x]`, to index
-//   a bone-matrix palette per vertex) or a float texture holding the palette.
-//   The AGAL translator has neither -- table lookups of constants are not
-//   translated, and Stage3D exposes no float texture format -- so this class
-//   runs the same arithmetic on the CPU and writes the result back into the
-//   geometry's position/normal attributes. Morph targets run first (three.js
-//   order: morph_vertex then skinning_vertex), then skinning consumes the
-//   morphed positions.
+// DEFORMATION STRATEGY (D84, three-core plan §17.4, revised by the M28
+// capability audit -- three-api-design.md §36):
+//   GPU skinning needs a per-vertex bone-matrix palette reachable from the
+//   vertex program. There are two ways to get one: relative constant addressing
+//   (`vc[a0.x]`, index a bone array per vertex) and vertex texture fetch. The
+//   first does not exist here at all -- the AGAL translator never emits an
+//   indexed constant read. The second DOES exist: `tld`/`vsN` is a real
+//   vertex-stage fetch, measured working on both adl 51.4.1 and the native
+//   Metal backend (three-api-design.md §36.4; D3D12/WebGL unmeasured). So the
+//   open question is not the FETCH, it is the STORAGE: a bone palette needs a float texture, and the only
+//   float format reachable from Stage3D here is RGBA_HALF_FLOAT, which exists
+//   only at the opt-in `standard` rung (the default build reports
+//   baselineExtended and answers #3759 to it) and is 16-bit. A half-float bone
+//   matrix keeps ~11 mantissa bits, i.e. ~5e-4 relative error; on a rig whose
+//   bind-pose translations are tens of units that is a visible per-joint offset,
+//   and it would differ between AIR and this backend. The palette would also
+//   contend for the same eight sampler units the material maps already fill.
+//   So this class runs the same arithmetic on the CPU and writes the result back
+//   into the geometry's position/normal attributes. Morph targets run first
+//   (three.js order: morph_vertex then skinning_vertex), then skinning consumes
+//   the morphed positions.
 //
 //   The cost is O(vertices * influences) per frame on the CPU instead of on the
-//   GPU. That is a deliberate, documented trade-off: the alternative would be a
-//   silently wrong skeleton or a renderer that cannot draw glTF skinned meshes at
-//   all. See three-api-design.md §17.4 for the measurements on the M12 demo.
+//   GPU. That is a deliberate, documented trade-off: today the alternative is
+//   not "GPU skinning" but "8-bit or half-precision bone matrices", which is
+//   worse than a correct CPU path. See three-api-design.md §17.4 for the M12
+//   measurements and §36 for the capability table that reopened the question.
 package asaot.three.objects
 {
     import asaot.three.core.BufferAttribute;

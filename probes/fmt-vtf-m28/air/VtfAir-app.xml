@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8" standalone="no" ?>
+<application xmlns="http://ns.adobe.com/air/application/51.1">
+    <id>com.asaot.three.probe.VtfAir</id>
+    <filename>VtfAir</filename>
+    <name>VtfAir</name>
+    <versionNumber>0.0.1</versionNumber>
+    <supportedProfiles>extendedDesktop</supportedProfiles>
+    <initialWindow>
+        <content>VtfAir.swf</content>
+        <renderMode>direct</renderMode>
+        <depthAndStencil>true</depthAndStencil>
+        <width>200</width>
+        <height>150</height>
+        <visible>true</visible>
+    </initialWindow>
+</application>

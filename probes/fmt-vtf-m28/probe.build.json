@@ -1,0 +1,15 @@
+{
+  "target": "native",
+  "opt": "-O2",
+  "sources": [
+    "../../../as3compiler/vendor/stage3d_glue.mm"
+  ],
+  "defines": [
+    "ASC_RENDER_STAGE3D=1",
+    "ASC_S3D_HALF_TEXTURES=1"
+  ],
+  "frameworks": [
+    "Metal",
+    "Foundation"
+  ]
+}
