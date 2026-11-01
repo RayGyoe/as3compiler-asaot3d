@@ -5,7 +5,7 @@
 
 > `three-src/` 是 three.js 仓库的浅克隆：**r187**，commit `a1ca74bcc6864918e59ec0ace357bba7551f3b9e`（2026-10-30），仅 sparse-checkout `src/`（757 个 `.js`）。行号以此版本为准。
 > 我们**只借设计与语义，不借实现**：three.js 是 JS + WebGL2，我们是 AS3 + Stage3D
-> （AGAL → MSL/GLSL ES 翻译器，E6 预留原生 shader 直通），两者落地形态必然不同。
+> （AGAL → MSL/GLSL ES 翻译器为主，E6 的 GLSL ES 3.00 原生通道为 opt-in 第二路），两者落地形态必然不同。
 > 凡是「形态不同」的行，最后一列都必须写清**为什么不照搬**。
 
 ---
@@ -103,6 +103,9 @@
 | `RGBELoader`（Radiance RGBE 解码：三种扫描线、`EXPOSURE`、`±X`/`±Y` 轴向、`32-bit_rle_xyze` 拒绝）+ `EquirectangularToCube`（等距柱状→六面，方向约定对齐 Stage3D cube 采样）+ `Scene.environmentIntensity`/`backgroundIntensity`/`backgroundBlurriness`（M25） | `src/loaders/RGBELoader.js`（`RGBEByteToRGBFloat` = `2^(e−128)/255` 缩放、`RGBE_RETURN` 三种、`±Y` 行序、`EXPOSURE=`）；`src/textures/CubeTexture.js`（六面顺序）；`src/scenes/Scene.js:57/:63/:69`（`environmentIntensity=1`/`backgroundIntensity=1`/`backgroundBlurriness=0`）；`src/extras/PMREMGenerator.js`（**不借**，见 N4） | ✅ 已升入 §1（`kit/asaot/three/{loaders/RGBELoader,extras/EquirectangularToCube,textures/HDRImage}.as`；渲染器 `_bgCubeProgramHdr`/`_bgCubeProgramHdrBlur{,9}` + `envIntensityOf`/`blurTapsFor`） |
 | `EXRLoader`（OpenEXR 扫描线解码：`chlist` 按名取 R/G/B、HALF/FLOAT、`dataWindow`、压缩 NONE/RLE；载荷压成 RGBE 而非 float 纹理）（M25-R3） | `src/loaders/EXRLoader.js`（`parseHeader`/`parseScanline`/`convertFloatToHalfFloat` 形状）；线格式来自 openexr `docs/OpenEXRFileLayout.md` 与 OpenEXRCore `internal_rle.c`（**RLE 前要先 `reorder_and_predict`**，见 `three-api-design.md` §33.3） | ✅ 已升入 §1（`kit/asaot/three/loaders/EXRLoader.as`；资产 `tools/gen-exr.js` → `assets/textures/hdr/studio.exr`） |
 
+| **`ShaderMaterial` 的参数面 + 内建 uniform 语义**（`vertexShader`/`fragmentShader`/`uniforms`/
+`defines`；`setValues()` 逐键赋值；渲染器每帧注入的 5 个自动 uniform） | `src/materials/ShaderMaterial.js:89`（`defines = {}`）、`:113`（`uniforms = {}`）、`:127`（`vertexShader`）、`:134`（`fragmentShader`）、`:272`（构造末尾 `setValues(parameters)`）、`:282-288`（`copy` 的 uniform/defines 克隆）；`src/materials/Material.js:557`（`setValues`）、`:576`（未知键**warn 后跳过**）；`src/renderers/WebGLRenderer.js:2617`（每程序/换相机时喂 `projectionMatrix`）、`:2619`（`viewMatrix`）、`:2621`（`cameraPosition`）、`:2836`（每物体喂 `modelViewMatrix`）、`:2838`（`modelMatrix`）；`src/renderers/webgl/WebGLUniforms.js:246/:331/:574`（值形状分派：vec4 / mat4 / sampler） | AS3 类 `ShaderMaterial extends Material`：字段同名同义，`uniforms` 用 `{name:{value:…}}` 的 Object 表（**D180**：纯数据、不 import `flash.display3D`，故同一份源码在 `mxmlc`/`adl` 下照编）；五个自动 uniform 由 `NativeShaderRenderer` 每 draw 注入（**D181**）。**D-borrow-1 差异**：`setValues()` 对未知键**抛 `ArgumentError`**，不照抄 three.js 的 `warn` —— 拼错 `unifroms` 在 three.js 里是静默无效，在 AOT-only 通道里同样的静默要花一轮真机像素去查。**D-borrow-2 差异**：不借 `uniformsGroups`/`uniformsNeedUpdate`（UBO 未实现，程序按 `material.version` 缓存）。**D-borrow-3 差异**：未声明的作者 uniform **warn 一次后跳过**（glslang 会裁掉未使用的 uniform，抛错会让「留着 `uTime` 备用」的常规写法直接崩）——这一条与 three.js 的 `Material.setValues` warn 同形，但判据不同：那边比的是「参数键」，这边比的是「反射表」 | `kit/asaot/three/materials/ShaderMaterial.as`、`seam/asaot/three/NativeShaderRenderer.as`、`seam/asaot/three/RendererFactory.as`（验收 `apps/shader-m30/` 15 项 PASS；决策见 `three-api-design.md` §37） |
+
 ---
 
 ## 2. 明确**不借**的
@@ -110,7 +113,7 @@
 | # | 不借什么 | three.js 出处 | 为什么不 |
 |---|---|---|---|
 | N1 | **WebGLRenderer + WebGL2 上下文绑定** | `src/renderers/WebGLRenderer.js` | 我们没有 WebGL2 上下文；渲染后端是 Stage3D + AGAL→MSL/GLSL 翻译器（`ASC_AGAL_TARGET`）。借的只是「渲染器是可替换接缝」这一形状，不是 WebGL 实现 |
-| N2 | **GLSL shader chunk 库** | `src/renderers/shaders/ShaderChunk/*.glsl.js` | three.js 的 shader 是 WebGL2 方言；我们 shader 走 AGAL 机器生成 → 翻译器，原生 shader 直通（E6）是后续 opt-in 增强，不是默认路径 |
+| N2 | **GLSL shader chunk 库** | `src/renderers/shaders/ShaderChunk/*.glsl.js` | three.js 的 shader 是 WebGL2 方言；我们 shader 走 AGAL 机器生成 → 翻译器，原生 shader 直通的源语言是 **GLSL ES 3.00**（E6 已落地为 opt-in 通道，`apps/shader-m30` 验收），作者自己写 GLSL，我们**不注入**任何 chunk |
 | N3 | **three.js 的 JS 运行期形态**（prototype 继承、动态类型、GC/闭包密集） | `src/core/Object3D.js` 等全部 | 我们按 `AGENTS.md` 用 AS3 强类型类 + retained 结构重写，不搬实现；搬 JS 形态会踩 as-aot 的「每帧热路径禁止 arena 临时分配」红线 |
 | N4 | **`PMREMGenerator` 的 GPU 预滤波链**（cube UV 图 + 逐粗糙度 LOD） | `src/extras/PMREMGenerator.js`、`ShaderChunk/pmrem/*.glsl.js` | 它把「粗糙度→mip 级」的映射塞进一张 cube UV 图，靠 float render target 与 `textureLod` 完成；本后端的 cube 没有 float/mip 存储（§36.2/.3），且 AGAL 片段程序没有 LOD 操作数（`tld` 是顶点专用，§36.4）。M25 的替代是 **CPU 等距柱状→六面烘焙 + 8 位伽马编码 + `hdrScale` 还原**，`backgroundBlurriness` 用**分档**角度锥近似（D152/D154/D156，0/5/9 tap）；粗糙度对反射锐度的预滤波**至今没有**（M25-R1） |
 | N5 | **`dfgLUT`（256×256 的 2D 环境 BRDF 查表）** | `src/renderers/shaders/ShaderChunk/lights_fragment_begin.glsl.js`、`lights_physical_pars_fragment.glsl.js` | r187 按 `(roughness, dotNV)` 取 `dfgLUT.rg` 得到 `F0·A+B`，并用 `Ess = dfg.x + dfg.y` 算 `multiScatteringCompensation = 1 + F0·(1/Ess − 1)`（直接光也乘）。我们现在用解析近似 `EnvBRDFApprox`，**借得动**：它是 8 位 2D 纹理，本后端采得了（不像 PMREM 要 float RT）。**2026-11-01 结案（两段）**：①瓣形错查清了 —— 是缺 `geometryRoughness`（D172）；②补偿本身也实现了（**D173**，§34.4）：直接光 + IBL split-sum + 点光/聚光三处都乘。**但实测只有 +2%/+3.5%，不是当初猜的 ×1.11** —— 补偿乘的是 F0，而 `metalnessMap = map` 的本体 F0 ≈ 0.07。于是 **LUT 本身失去意义**：解析式 `Ess = 1 − 0.55·roughness` 与 LUT 的差别只在「是否随 NoV 变」，而这个差别进的是一项 ×0.02~0.035 的系数，量级 1e-3 —— **不需要为它引一张纹理和一个采样槽**。这一行从「可借」改成「判断为不借，理由实测」。 |

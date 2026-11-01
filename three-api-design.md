@@ -11,7 +11,8 @@
 1. **只借设计、不借实现**：three.js 是 JS + WebGL2，我们是 AS3 + Stage3D（AGAL→MSL/GLSL），
    落地形态必然不同。凡是「形态不同」处，本文都写清「为什么不照搬」。
 2. **AGAL-first 渲染后端**：材质编译成 AGAL，走 as-aot 现有翻译器（`ASC_AGAL_TARGET`），
-   源码在 adl/真 AIR 上也能跑（对齐 AIR 底线）。原生 shader 直通（E6）是后续 opt-in。
+   源码在 adl/真 AIR 上也能跑（对齐 AIR 底线）。原生 shader 直通（E6）是**已落地的 opt-in 第二通道**
+   （§37，M30）：默认构建不变，开了 `--features native-shader` 才多一个后端。
 3. **可变数学库 + 就地方法**：three.js 的 `Vector3`/`Matrix4` 是**可变对象**，
    `set()/add()/multiplyScalar()` 就地改值并 `return this` 支持链式。这套风格**恰好契合**
    as-aot 的内存红线——「禁止在每帧/每循环热路径里产生进 arena 的临时分配」。照抄它。
@@ -291,8 +292,8 @@ public interface IRenderer {
 
 | 后端 | 落地 | 状态 |
 |---|---|---|
-| `AGALRenderer` | 遍历场景图 → 生成 draw call → 每个材质编译成 AGAL → `ASC_AGAL_TARGET` 翻译成 MSL/GLSL ES | **默认，首里程碑** |
-| `NativeShaderRenderer` | 作者手写 GLSL ES/MSL（three.js `ShaderMaterial` 风格），绕过 AGAL | E6，opt-in，后续 |
+| `AGALRenderer` | 遍历场景图 → 生成 draw call → 每个材质编译成 AGAL → `ASC_AGAL_TARGET` 翻译成 MSL/GLSL ES | **默认，主后端** |
+| `NativeShaderRenderer` | 作者手写 GLSL ES 3.00 一对（three.js `ShaderMaterial` 风格），经 glslang + SPIRV-Cross 直接编到 MSL，绕过 AGAL | **✅ M30 落地，opt-in**（`--features native-shader`；未开时探测不到、`ShaderMaterial` 抛错，见 §37） |
 
 **AGAL-first 的含义**：`MeshStandardMaterial` 等标准材质在 seam 层**机器生成** AGAL 程序
 （顶点：position/normal/uv 变换 + MVP；片元：metallic-roughness PBR 简化式），**不要求作者
@@ -902,7 +903,8 @@ three.js 用 `packDepthToRGBA`/`unpackRGBAToDepth` 把深度摊到 4 个字节�
 （`fc25` = 深度解包因子）。
 
 要突破这条红线，只有三条路：AGAL3+ 增加采样槽、把 AO/emissive 合并进 base color 的采样、
-或落地 E6 原生 shader 直通。三条都超出 M13，登记为遗留。
+或落地 E6 原生 shader 直通（**第三条已在 M30 落地，看 §37**；前两条仍未做）。M13 当时把三条都
+登记为遗留。
 
 ### 18.7 编译期 AGSL 校验（R23）
 
@@ -3857,3 +3859,123 @@ STENCIL，`drawToBitmapData()` 抛 `#3692`（本探针用 `mask=3` 时撞上，�
 - **半浮点 cube**：不做。收益被 8 位输出和 `hdrScale` 完全吃掉。
 - **GPU 蒙皮**：VTF 已在 AOT/Metal 与 AIR 打通（§36.4），剩下的前置只剩**精度实验**
   （16F 骨矩阵在绑定姿态位移数十单位时 ~5e-4 相对误差）与采样槽竞争。先量，再决定。
+
+---
+
+## 37. 原生着色器通道：引擎侧 `ShaderMaterial` / `NativeShaderRenderer`（D180–D186、R66–R70，2026-11-02 M30 拍板）
+
+> 编译器侧（`Context3DNative` / `NativeProgram3D` / Metal 胶水 / `--features` 门控）记在
+> `as3compiler/docs/zh-cn/{native-shader.md,native-shader-plan.md}`；本节只记**引擎侧**的形状与
+> 落地时暴露的缺陷。触发场景是 Ultra-Water（`OceanSim.js` 的 MRT FFT + `textureLod` 位移），
+> 但这一轮验收只用一张 2×2 四边形把通路钉死，**不掺海水**。
+
+### 37.1 为什么是「第二通道」而不是「换掉 AGAL」
+
+AGAL 是 AIR 能跑的唯一形态，`MeshStandardMaterial` 那套机器生成 AGAL（PBR/阴影/雾/tone）已经被
+M6–M27 对齐到参考值的几个百分点内 —— 换掉它等于把全部验收证据清零。E6 的价值在**AGAL 表达不了
+的东西**：浮点渲染目标、MRT、`texelFetch`、整数/位运算、`textureLod`、深度纹理。所以：
+
+- **默认后端不动**，`AGALRenderer` 仍是唯一默认路径；
+- 原生通道是**按材质粒度**的逃生舱：`ShaderMaterial` 的 draw 走 native，其余材质照旧走 AGAL；
+- 两者**共用一个接缝**（`IRenderer`），不新增方法、不加开关枚举（**D181**）。
+
+### 37.2 四个对象的分工
+
+| 文件 | 职责 | 关键约束 |
+|---|---|---|
+| `kit/asaot/three/materials/ShaderMaterial.as` | `extends Material`，纯数据：`vertexShader` / `fragmentShader` / `uniforms`（`{name:{value:...}}`）/ `defines`；`setValues()` 拒绝未知键 | **不 import `flash.display3D`** ⇒ `mxmlc` 下同一份源码照编（**D180**） |
+| `seam/asaot/three/NativeShaderRenderer.as` | `extends AGALRenderer`，**只覆写** `_drawShaderMaterial(mesh, material)`：建/复用程序、按反射名喂 uniform、绑纹理、绑属性、draw | 一次 `import` 都不写 `Context3DNative`，全部走 `Class` + 方括号（**R67**） |
+| `seam/asaot/three/RendererFactory.as` | `getDefinitionByName("asaot.three.NativeShaderRenderer")` 探测 + `create(context)` 回退 `AGALRenderer` | 探测失败**缓存 null 也是答案**，不要每次 `try/catch` |
+| `seam/asaot/three/app/Stage3DApp.as` | 创建点从 `new AGALRenderer(_context)` 改成 `RendererFactory.create(_context)` | 字段类型仍是 `AGALRenderer`（工厂返回类型就是它），子类赋值天然兼容 |
+
+`AGALRenderer` 侧的改动只有三处：`_renderMesh` 顶部的 `if (material is ShaderMaterial)` 分派、
+`protected function _drawShaderMaterial(...)`（基类**抛错**，**D183**）、`_context` 从 `private` 放宽到
+`protected` 与新增 `_camera`（自动 uniform 要用相机位置）。
+
+### 37.3 uniform 绑定：按**反射名字**，不按槽位
+
+SPIRV-Cross 给每个 uniform 独立一个 `[[buffer(N)]]`（M1 实测），所以绑定不需要算 `std140` 偏移，
+也不需要自己排槽位 —— 名字够用。规则：
+
+- **五个自动 uniform**：`projectionMatrix` / `modelViewMatrix` / `modelMatrix` / `viewMatrix` /
+  `cameraPosition`，与 three.js `ShaderMaterial` 的内建 uniform 同名；
+- **别名表**（`ALIASES`）：`position`/`normal`/`uv`/`color` → 引擎几何的 attribute 名；
+  名字对不上时**按位置回退**（`BY_LOCATION`），兜住作者抄 three.js 例子的 `in vec3 position`；
+- **作者 uniform** 按**形状**分派（`16 = mat4`，`4/3/2/1` 分量走 `setUniform4f/3f/2f/1f`），`Texture` 走
+  `bindTexture`；**`mat3` 未支持** —— `Context3DNative` 只开了 `setUniformMatrix4`，没有 `mat3` 入口，
+  9 分量落地成一次 warn（不静默丢，也不谎称已经上传）；
+- 反射表里**没有**的名字：**warn 一次**而不是抛（**D182**）—— glslang 会把未使用的 uniform 裁掉，
+  作者留着一个没被读的 `uTime` 是常态，为此打断渲染是错的方向；拼错名字导致的「着色器不理我的
+  光照」由这条 warn 指出来（编译器侧 `setUniform` 对**完全不存在**的名字抛 `#2008`，两处判据不同）。
+
+**D184**：程序按 `material.version` 缓存、纹理按 `Texture.version` 缓存，两者都是「变形才重编」，
+不是每帧。**R69**：自动 uniform 的矩阵必须用**独立 scratch**（不复用基类的 `_mvp`）—— 基类在
+`_applyMaterialState` 里会用 `_mvp`，共用一个 scratch 会把两边的残留互相污染，症状是「第一个 draw
+对、后面的模型矩阵错一帧」。
+
+### 37.4 §8 红线的落地形态：**抛错**，不是近似图
+
+设计文档 §8 只说了「AOT-only，AIR 侧必须如实报明」。引擎侧的选择是（**D183** / **R66**）：
+
+```
+_drawShaderMaterial() 基类:  throw new Error("material '" + labelOf(material) + "' needs the native
+  shader channel: build with --features native-shader ...");
+```
+
+理由：`MeshStandardMaterial` 的 AGAL 路径在 `ShaderMaterial` 上是**语义错误**（作者写的是自己的
+光照，AGAL 会套 PBR），画出来的东西「看着像海洋、数值全错」，而 §0 红线说语义错误比缺失功能更致命。
+验收证据：`apps/shader-m30` 在**默认构建**与 `adl` 下打印 `NO-CHANNEL`、退出码 0（不刷栈、不黑屏卡死），
+同一份 `.as` 在 `--features native-shader` 下 15 项 PASS。
+
+### 37.5 可达性：`extra-roots` 清单字段（**D185**）
+
+`RendererFactory` 用**字符串**引用 `asaot.three.NativeShaderRenderer`，所以 `--air-app` 的闭包
+（`src/reach.ts`）看不见它 —— 而它的症状是**静默退化**（探测落空 ⇒ 回到 `AGALRenderer` ⇒ 首帧
+抛 `_drawShaderMaterial` 的错，或者更糟：没人用 `ShaderMaterial` 就完全看不出来）。编译器侧因此新增
+清单字段 `extra-roots`：
+
+```json
+{ "extra-roots": ["asaot.three.NativeShaderRenderer"] }
+```
+
+- 只做「把名字塞进闭包根集合」，**不解析路径**（路径由 `--air-app` 的源码根决定）；
+- 两种入口：清单字段 `extra-roots`，与 CLI `--extra-roots a.b.C,d.E`（**`--air-app` 每次重写
+  `<Main>.build.json`，所以只存在于清单里的字段在构建脚本里无法使用**，→ 才补了 CLI 那一半）；
+- 去重；拼错字段名走既有的 `unknown field 'extra-root' (did you mean 'extra-roots'?)`；
+- 同名类不存在 = 忽略（不是错误），因为同一个清单要能跨构建复用。
+
+demo 侧不手写清单：`apps/<demo>/features` 与 `apps/<demo>/extra-roots` 两个文本文件（一行一个，`#` 注释）
+由 `tools/build-demo.sh` 注入（**D186**），`--air-app` 每次重写的 `<Main>.build.json` 因此不需要进库。
+
+### 37.6 落地时暴露的四个真缺陷（都是「编译过、结果错/空」）
+
+| # | 症状 | 根因 | 修法 |
+|---|---|---|---|
+| 1 | 链接期 `_asc_shader_translate` 未定义 | `--features` 只加 `ASC_USE_NATIVE_SHADER=1` 宏，不带 shim / include 路径 / 14 个 `.a` | `build.ts::applyFeatureDeps`：feature 自己声明依赖（`shader_compiler.cc` + `link-order.txt`），不再靠每个 demo 写清单 |
+| 2 | native 构建**静默退化成默认构建** | 内建类 `Context3DNative`/`NativeProgram3D` 注册时没给 `reflectFqn`，`getDefinitionByName` 的注册表按它建键 ⇒ 探测落空、工厂回退 `AGALRenderer`，全程零报错 | `symbols.ts` 补 `reflectFqn: 'flash.display3D::Context3DNative'` / `::NativeProgram3D`（**R70**） |
+| 3 | Metal 拒绝该 pass：`aPos(0)` 不在顶点描述符里 | `s3d_native_use` **立刻**建管线，而顶点流要到 `drawTriangles` 才绑 | `nativePsoPending`：延到首绘再建（顶点描述符此刻齐备） |
+| 4 | draw 编码了，但**什么都没画**，零报错 | `Context3DNative.drawTriangles` 自己发 draw，绕过 `Context3D_submit`（顶点缓冲的上传同步点在那里） | 改走 AGAL 同一个提交点 |
+
+第 2、4 两条是本轮最贵的教训：**空画面与退化都不报错**。判据因此不能是「跑起来了」，而是
+「`drawToBitmapData` 读回的像素是对的值」——`apps/shader-m30` 的 15 项断言里前 12 项是通路结构，
+后 3 项才是像素，缺了后 3 项这个 demo 就什么都没证明。
+
+### 37.7 规则（R66–R70）
+
+- **R66**：没有 native 通道时 `ShaderMaterial` **必须抛**，禁止回退 AGAL 近似图（理由见 §37.4）。
+- **R67**：探测原生类的代码**禁止 `import`**（类型位置在 `mxmlc` 下是 `#1046` 编译失败）；
+  一律 `getDefinitionByName` → `Class` → 方括号调用。
+- **R68**：只被字符串命名的类**必须**登记 `extra-roots`；漏登的症状是静默退化，不是报错。
+- **R69**：自动 uniform 的矩阵 scratch 与基类 `_mvp` 必须分开（§37.3）。
+- **R70**：新增**内建** native 类必须在 `symbols.ts` 带 `reflectFqn`（`pkg::Name` 形）；缺它时
+  `getDefinitionByName` 永远落空，而症状是「静默退化成默认构建」——既有钉子在 `test/unit/native-shader.ts`。
+
+### 37.8 余项（明确登记）
+
+- **M4 Web 直通**：`stage3d_webgl.cc` 把作者 GLSL ES 3.00 原样喂 WebGL2 + `EXT_color_buffer_float`，
+  零交叉编译。目前 `--features native-shader` **只声明 `native` 目标**，wasm 打开会被前置拒绝。
+- **M5 D3D12**：`stage3d_d3d.cc` 的浮点 `DXGI_FORMAT` + 原生 HLSL（SPIRV-Cross 那半边库已链好）。
+- **M7 Ultra-Water 对齐**：FFT（MRT 写两张浮点图）→ `textureLod` 顶点位移 → caustics → 大气/水下。
+  这一轮只证明了通路，**没有证明海洋**。
+- `RawShaderMaterial`（不注入任何前导）、UBO（`layout(std140) uniform`）：未做，`ShaderMaterial`
+  足够覆盖 three.js 的 `ShaderMaterial` 用法。

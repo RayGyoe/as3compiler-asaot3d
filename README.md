@@ -12,19 +12,23 @@
    的**具体文件 + 行号**，形态不同的行写清「为什么不照搬」（见 `three-borrow-map.md`，
    规则同 asaotui 的 `gpui-borrow-map.md`）。
 3. **渲染后端**：AGAL-first——材质编译成 AGAL，走 as-aot 现有的
-   AGAL→MSL/GLSL 翻译器（`ASC_AGAL_TARGET`），源码在 adl/真 AIR 上也能跑（对齐 AIR 底线）；
-   原生着色器直通（E6，增强项）留作后续 opt-in 逃生舱。
+   AGAL→MSL/GLSL 翻译器（`ASC_AGAL_TARGET`），源码在 adl/真 AIR 上也能跑（对齐 AIR 底线）。
+   原生着色器直通（E6，增强项）**已落地为 opt-in 第二通道**（M30，2026-11-02）：
+   `--features native-shader` 才注册 `Context3DNative`/`NativeProgram3D`，作者写 GLSL ES 3.00 的一对
+   vertex/fragment 经 glslang → SPIR-V → SPIRV-Cross 落到 MSL；**默认构建一个字节都不变**，没开开关时
+   `RendererFactory` 探测不到、`ShaderMaterial` 在有 native 通道前**抛错而不是画近似图**（设计见
+   `../as3compiler/docs/zh-cn/native-shader.md`，引擎侧决策见 `three-api-design.md` §37）。
 
 ## 许可
 
 three.js 是 **MIT**，借鉴/移植只需保留版权声明。
 
-## 目录结构（规划）
+## 目录结构
 
 | 目录 | 职责 | 命名空间 |
 |---|---|---|
 | `kit/asaot/three/` | 纯 AS3 引擎（场景图 / 数学 / 几何 / 材质 / 相机 / 灯光 / 加载器） | `asaot.three.*` |
-| `seam/asaot/three/` | 渲染接缝（AGAL 后端 vs E6 原生 shader 后端）+ 应用宿主 `app/Stage3DApp.as`（刷新率同步 / resize / 帧循环） | `asaot.three.*` |
+| `seam/asaot/three/` | 渲染接缝（`AGALRenderer` 默认 + `NativeShaderRenderer` 原生通道 + `RendererFactory` 探测）+ 应用宿主 `app/Stage3DApp.as`（刷新率同步 / resize / 帧循环） | `asaot.three.*` |
 | `seam/com/adobe/utils/` | Adobe 官方 `AGALMiniAssembler`（BSD）**全仓唯一副本** | `com.adobe.utils.*` |
 | `three-src/` | three.js 浅克隆（r187，commit `a1ca74b`），供 borrow-map 指出处 | — |
 | `tools/build-demo.sh` | 双后端构建实现（AOT / AIR），被 `apps/<demo>/build.sh` 转发调用 | — |
@@ -53,7 +57,7 @@ three.js 是 **MIT**，借鉴/移植只需保留版权声明。
 >   --main-class <Main> --as-class-path seam --as-class-path kit
 > ```
 
-## 进度（M25 · HDR 环境光 ✅；M26 · 骨骼可视化 + 键盘桥 + 交叉淡入：`webgl_animation_walk` 移植）
+## 进度（M30 · 原生着色器通道 E6 ✅；M26 · 骨骼可视化 + 键盘桥 + 交叉淡入：`webgl_animation_walk` 移植）
 
 | 里程碑 | 状态 |
 |---|---|
@@ -96,6 +100,8 @@ three.js 是 **MIT**，借鉴/移植只需保留版权声明。
 | M25-R1 预滤波阶梯 + M27 LightProbe（§35，2026-11-01） | ✅ 落地。①**先算预算再动手**：这个后端的片元采样器只有 `fs0..fs7`（`stage3d_glue` 只处理 `unit < 8`），而阴影变体已经八槽满员 ⇒ **没有 `fs8`**，「PMREM + 独立 irradiance cube」两条都放不下（第一版试过写 `fs8`，探针过、AOT 过，AIR 里那个槽根本不存在 —— 典型的「碰巧能跑」，已回滚，**D175**）。②**M25-R1**：CPU 产出 6 档（`roughness 0/0.2/0.4/0.6/0.8/1.0`）cube 阶梯，图元侧按 `material.roughness` 选一档绑 `fs7`，AGAL 侧**反而少 6 条指令**（`prefiltered=1` 不再发 M9 的 `mix(cube(R), cube(N), r⁴)` 替代块，`213/400 → 217/400` 但同解码状态相比 −6）。叶瓣用 Karis 余弦幂拟合（与 GGX 的交叉点在 `r = 0.9526`，探针 `A8`），核必须**角度各向同性**（横向 sigma 除 `sin(polar)`，否则纬度 60° 的灯糊成横条），能量守恒**按构造**保证（各档结束前按 `EnvironmentPrefilter.sphereMean(base)` 重标定，`E2` 用 `1e-12` 钉住 —— 第一版用像素均值当不变量是错的，极点行不代表更少立体角）。③**D178 分帧烘焙**：同一份 CPU 循环 AOT **84–98 ms** 对 `adl` **2186–2356 ms**（26 倍），两秒落在一帧就吃掉 AIR 15 秒看门狗的三分之一（栈停在 `Object3D.updateMatrixWorld`，看着像渲染器 bug）；`PrefilterJob.step()` 每帧烘一档（第 0 档就是清晰 cube，环境立刻可用，`partial()` 保证中途渲染不是非法态）。④**M27**：见路线图行。⑤**D177**：HDR 存储曲线与渲染器解码收成**一对**真 sRGB（`EquirectangularToCube.srgbOetf` ↔ `srgbDecodeBlock`/`fc41`），`fc36`/`DECODE_CONST` 退役。验收：`prefilter-smoke-m25r1` **39 项**、`lightprobe-smoke-m27` **36 项**、`hdr-smoke-m25` **69 项**、`texstate-m17` **77 项**全 ALL PASS；`apps/hdr-m25` AOT `bake 128px in 98ms over 6 frames` + 截图逐档验证高光宽度单调变宽。**AIR 侧两个新发现的真缺陷已修**（`Keyboard` 同名歧义、`AGALRenderer` 未 import ⇒ `#1065`），**但 `adl` 下 cube 背景仍不绘制**（D179，未定位：片元/顶点/剔除/状态/深度/缓冲/普通 LDR 变体逐项 A/B 全部排掉，唯一没排除的是 adl 自己 —— 同 session 间歇 `#1502`），故背景天空盒**不进已验收**。§35 |
 | 能力面实测：格式 / profile / 顶点纹理取值（§36，2026-11-02） | ✅ 落地（**只记录实测，不靠文档推断**）。做法：一支无窗口 Stage3D 探针按引擎真实调用方式在 **AOT/Metal** 与 **AIR/adl 51.4.1** 各跑一遍并读回像素（`probes/fmt-vtf-m28/`，已入库可复跑）。四条结论：①**profile 不跟随请求** —— `requestContext3D("auto","enhanced")` 在 AIR 得到 `enhanced`、在 AOT 得到 `baselineExtended`，后果是 `createTexture("rgbaHalfFloat")` 在 AIR 成功而在 AOT 报 `#3759`；带 `ASC_S3D_HALF_TEXTURES=1` 时 AOT 认领 `standard` 且半浮点 RT **真的保住 2.0**（`clear(2.0)×0.25` → `0x808080`，8 位为 `0x404040`）。**没有**去谎报 `enhanced`（还缺 MRT）。②**格式只对 2D/RT 有效**：`rgbaHalfFloat` cube 被接受但存的是同样那批 8 位字节（取样逐位等于 `bgra` cube）⇒「半浮点 cube 装真 HDR」这条路不通，M25 的 8 位 sRGB + `hdrScale` 取舍因此仍然成立，但**理由换了**。③**cube 的 `miplevel>0` 上传被静默丢弃**（不抛、不改 level 0）⇒ M25-R1 的六个独立 `CubeTexture` 是唯一可行形态，别改回 mip 方案。④**VTF**：开工时 AIR 可用（`tld`+`vs0` 读回绿色）、AOT 在 draw 抛 `Error id=0 msg=null`（按 §1.5 属**遗留缺陷**）；写文档时编译器侧的 `tld` 已由另一路落地，重跑同一探针 AOT/Metal 也读到 `0xff00` ⇒ **两端一致**，D3D12/WebGL 与顶点采样器 flags 仍未测。落地改动：全仓 12 处把「后端没有浮点纹理」当成平台事实的注释/文档改成**分档测**口径（`SkinnedMesh`/`Skeleton` 的 D84/D85 理由从「取不到」改为「存储只有 16F 且仅 `standard` 档，精度不足」）；阴影 prepass 的 `clear(...,3)` 补 `#3692` 依赖说明（`depthAndStencil` 下掩码缺 STENCIL 会让 `drawToBitmapData` 抛错，那里靠「不回读」才安全）。详见 §36 |
 | loader 第二批（§31.8，2026-11-01） | ✅ L6/L12/L3 落地 + 口径收尾。①**L6 `LoadingManager`**：`itemStart/itemEnd/itemError` + `onStart/onLoad/onProgress/onError` + `setURLModifier`，构造用**可选参数**扩展（`new FileLoader(manager)`）、既有调用零改动；`itemError` **不**平衡计数、失败项仍 `itemEnd`（three.js 同）——所以「一个失败也算这批结束」。**D162** 不做 `normalize('NFC')`（as-aot 无归一化数据）；**D163** 不落 manager 级 `abortController`（批级取消要新所有权层）；**D164** `addHandler/getHandler/removeHandler` **实现但不消费**。②**L12 `GLTFLoader.register()`**：四个钩子 `getMaterialType`/`extendMaterial`/`createNodeMesh`/`afterRoot`，**D165** 同步+给实例（AS3 无 Promise、无类值），触发面与 three.js 一致；坑：AS3 用多于声明的参数调闭包抛 `#1063`，钩子必须按声明**元数**派发。③**L3 `KHR_texture_transform`**：`offset/scale/rotation` 落到 `Texture` 的 M18 uv 变换，**D166** 逐引用 `clone()`（两槽同图不同变换不串味）。④顺带修 `RGBELoader` **D158 复发**（M25 写它时又把请求与回调放回实例字段）。验收：`loader-smoke-m5` 第 14 节 **22 条断言 ALL PASS**（批聚合/失败仍平衡/`setURLModifier` 收到已拼前缀的 URL 且真改写读取结果/`texture.image is BitmapData`/同 URL 并发拿到两个不同对象/3 面报错不挂起/`ImageLoader` 不调 `onProgress`/插件四钩子各一次/变换逐引用生效）。§31.8 |
+
+| 原生着色器通道（**E6 · M30**，2026-11-02） | ✅ 落地（引擎侧；编译器侧 M2/M3 见 `as3compiler/TODO.md` 阶段三百五十三）。三件新增 + 一条红线：①`ShaderMaterial`（`kit/.../materials/`，**纯数据**：`vertexShader`/`fragmentShader`/`uniforms`/`defines`，**不 import `flash.display3D`** ⇒ 同一份源码在 `mxmlc` 下照编）；②`NativeShaderRenderer`（`seam/.../`，`extends AGALRenderer`、只覆写 `_drawShaderMaterial`）——五个自动 uniform（`projectionMatrix`/`modelViewMatrix`/`modelMatrix`/`viewMatrix`/`cameraPosition`）+ 作者 uniform 全部按**反射名字**喂给 `Context3DNative`，`ALIASES`（`position`/`normal`/`uv`/`color`）+ 按位置回退兜住 three.js 的 `attribute vec3 position` 写法；③`RendererFactory` 运行时探测（`getDefinitionByName` 落空即回 `AGALRenderer`），`Stage3DApp` 的创建点从 `new AGALRenderer(...)` 改成 `RendererFactory.create(...)`。验收 `apps/shader-m30/`（作者 GLSL ES 3.00 一对 → 2×2 四边形 → `drawToBitmapData` 读回）**15 项全 PASS**：中心 `#804020` = `uColor.rgb * 0.5` 逐位相符、3/8 处 `#361b0e` 证明 `vUV` 真的插值、反射表 `aPos,projectionMatrix,modelViewMatrix,uColor`，顶点译文含反射到的 `[[buffer(n)]]` 与后端要求的 `main0` 入口。**§8 红线**：同一份 `.as` 在默认构建/`adl` 下打印 `NO-CHANNEL` 并以 0 退出 —— `ShaderMaterial` 在没有 native 通道时**抛错**，不拿 AGAL 画一张「看着对的错误图」。另新增 `extra-roots` 清单字段（`asaot.three.NativeShaderRenderer` 只被字符串命名、闭包看不见它），闭包路径下确实被编译进去（65/123 sources）。**落地时暴露并修掉四个「编译过、结果错/空」**：feature 不带 shim/档案（链接期 `_asc_shader_translate` 未定义）、新类缺 `reflectFqn`（探测落空 ⇒ **静默退化成默认构建**）、`s3d_native_use` 立刻建管线而顶点流尚未绑定（Metal 拒「`aPos(0)` 不在顶点描述符里」）、`Context3DNative.drawTriangles` 绕过 `Context3D_submit`（顶点从没上传，**draw 编码了但什么都没画**）。余项：M4 Web 直通 / M5 D3D12 / M7 Ultra-Water 对齐。决策 D180–D186、R66–R70 见 `three-api-design.md` §37 |
 
 > 数学库落地详情与每一条 three.js 出处见 `three-borrow-map.md` §1；API 形状见 `three-api-design.md`。
 
