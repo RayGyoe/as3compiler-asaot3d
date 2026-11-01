@@ -113,6 +113,20 @@ package asaot.three
             return _native;
         }
 
+        // Draw one mesh through the native channel, WITHOUT a scene walk.
+        //
+        // Exists for the caller that owns its render target (M7's FFT passes: bind
+        // two float attachments, draw a full-screen quad, repeat 16 times). Those
+        // passes have no Scene and no frustum, so `render()` cannot express them --
+        // but they still must go through the SAME code the scene walk uses, or the
+        // pass path and the mesh path would drift on uniform/attribute binding.
+        // The caller is responsible for the target (setRenderTargets/setBackBuffer)
+        // and for `_camera` being current, which any preceding render() provides.
+        public function drawNative(mesh:Mesh, material:ShaderMaterial):void
+        {
+            this._drawShaderMaterial(mesh, material);
+        }
+
         // ------------------------------------------------------------------
         // The one overridden step.
         // ------------------------------------------------------------------
@@ -197,15 +211,23 @@ package asaot.three
             return lines + source;
         }
 
-        // Split the reflection table into "attributes, by location" and "uniform
-        // names the program declares", once per compile. Doing it per draw would
-        // walk four arrays on every mesh.
+        // Split the reflection table into "attributes, by location" and "uniforms,
+        // by name + scalar category", once per compile. Doing it per draw would walk
+        // six arrays on every mesh.
+        //
+        // The category matters: feeding a float to `uniform int uSub` stores the BIT
+        // PATTERN of 2.0 (1073741824), which Metal accepts and the shader then uses as
+        // a loop bound. The FFT passes are almost entirely integer uniforms (uSub,
+        // uVertical, uCascade, uSeed), so this is the difference between an ocean and
+        // a black screen.
         private function _indexReflection(entry:Object, program:Object):void
         {
             var names:Array = program["bindingNames"];
             var kinds:Array = program["bindingKinds"];
             var slots:Array = program["bindingSlots"];
-            var stages:Array = program["bindingStages"];
+            var comps:Array = program["bindingComponents"];
+            var bases:Array = program["bindingBaseTypes"];
+            var sizes:Array = program["bindingSizes"];
             var attrs:Object = {};
             var uniforms:Object = {};
             if (names == null) return;
@@ -218,7 +240,11 @@ package asaot.three
                 }
                 else
                 {
-                    uniforms[String(names[i])] = true;
+                    uniforms[String(names[i])] = {
+                        components: comps == null ? 1 : int(comps[i]),
+                        baseType: bases == null ? 0 : int(bases[i]),
+                        size: sizes == null ? 1 : int(sizes[i])
+                    };
                 }
             }
             entry["attrs"] = attrs;
@@ -265,31 +291,35 @@ package asaot.three
             this._setUniformIfDeclared(entry, program, name, data);
         }
 
-        // Dispatch by SHAPE, not by reflection type: the reflection table carries
-        // kind/slot but not a scalar-vs-vector type, and a Vector of 16 numbers can
-        // only be a mat4 in this channel. An undeclared name is dropped silently
-        // HERE (the shader does not need it); an author-visible mistake is caught
-        // by the backend's #2008 only when the program does declare it, so a typo
-        // inside material.uniforms is reported by the first draw, not swallowed.
+        // Dispatch by the REFLECTED shape, not by the AS3 value alone. The reflection
+        // table now carries `components` (scalars per element), `size` (array length)
+        // and `baseType` (float/int/uint/bool), which is exactly what is needed to
+        // choose both the entry point and the bit pattern:
+        //
+        //   int/uint/bool  -> setUniformInts    (a float would be reinterpreted)
+        //   float, >4 words-> setUniformFloats  (a vec4[2] is one 8-word payload)
+        //   float, 1..4    -> setUniform1f..4f
+        //
+        // A name the program does not declare is dropped HERE (the shader does not
+        // need it); an author-visible mistake is caught by the backend's #2008 only
+        // when the program does declare it, so a typo inside material.uniforms is
+        // reported by the first draw, not swallowed.
         private function _setUniformIfDeclared(entry:Object, program:Object, name:String, value:*):void
         {
-            if (entry != null && entry["uniforms"] != null)
+            var spec:Object = (entry != null && entry["uniforms"] != null) ? entry["uniforms"][name] : null;
+            if (spec == null)
             {
-                if (entry["uniforms"][name] != true)
+                // The program does not declare it. For an AUTO uniform that is normal
+                // (the shader uses none of them); for an author uniform it is almost
+                // always a typo, and the backend would answer #2008 -- which is right
+                // for a hand-written call and wrong to throw from inside a frame.
+                if (AUTO_UNIFORMS.indexOf(name) < 0)
                 {
-                    // The program does not declare it. For an AUTO uniform that is
-                    // normal (the shader uses none of them); for an author uniform
-                    // it is almost always a typo, and the backend would answer
-                    // #2008 -- which is right for a hand-written call and wrong to
-                    // throw from inside a frame. Report once, skip the upload.
-                    if (AUTO_UNIFORMS.indexOf(name) < 0)
-                    {
-                        this._warn("u2:" + name, "material.uniforms carries '" + name +
-                            "' but the program does not declare it (typo, or a uniform another " +
-                            "program of this material uses); it is not uploaded");
-                    }
-                    return;
+                    this._warn("u2:" + name, "material.uniforms carries '" + name +
+                        "' but the program does not declare it (typo, or a uniform another " +
+                        "program of this material uses); it is not uploaded");
                 }
+                return;
             }
 
             if (value is Texture)
@@ -298,19 +328,46 @@ package asaot.three
                 if (tex != null) _native["bindTexture"](program, name, tex);
                 return;
             }
+            // A render target created by Context3DNative.createTexture IS already a
+            // flash Texture, so there is nothing to upload: bind it as-is. Without
+            // this branch an offscreen pass could not read what the previous pass
+            // wrote, which is the whole shape of an FFT ocean.
+            if (value is TextureBase)
+            {
+                _native["bindTexture"](program, name, TextureBase(value));
+                return;
+            }
+
+            var baseType:int = int(spec["baseType"]);
+            var want:int = int(spec["components"]) * int(spec["size"]);
+
             if (value is Vector.<Number> || value is Array)
             {
                 var v:Vector.<Number> = (value is Vector.<Number>) ? Vector.<Number>(value) : this._toNumbers(value);
-                if (v.length == 16) { _native["setUniformMatrix4"](program, name, v); return; }
+                if (baseType != 0)
+                {
+                    _native["setUniformInts"](program, name, this._toInts(v));
+                    return;
+                }
+                if (want == 16) { _native["setUniformMatrix4"](program, name, v); return; }
+                if (want > 4 || v.length > 4) { _native["setUniformFloats"](program, name, v); return; }
                 if (v.length == 4) { _native["setUniform4f"](program, name, v[0], v[1], v[2], v[3]); return; }
                 if (v.length == 3) { _native["setUniform3f"](program, name, v[0], v[1], v[2]); return; }
                 if (v.length == 2) { _native["setUniform2f"](program, name, v[0], v[1]); return; }
+                if (v.length == 1) { _native["setUniform1f"](program, name, v[0]); return; }
                 this._warn("u:" + name, "ShaderMaterial uniform '" + name + "' has " + v.length +
-                    " components; the native channel takes 1, 2, 3 or 16");
+                    " components; the native channel takes 1, 2, 3, 4 or 16");
                 return;
             }
             if (value is Number || value is Boolean || value is int || value is uint)
             {
+                if (baseType != 0)
+                {
+                    var iv:Vector.<int> = new Vector.<int>(1, false);
+                    iv[0] = int(Number(value));
+                    _native["setUniformInts"](program, name, iv);
+                    return;
+                }
                 _native["setUniform1f"](program, name, value ? Number(value) : 0);
                 return;
             }
@@ -320,10 +377,31 @@ package asaot.three
                 "' is not a Number/Vector/Texture, which is all the native channel binds");
         }
 
+        // Flatten nested arrays ([Vector4, Vector4] for a vec4[2]) into one run, so a
+        // GLSL array uniform can be written the way three.js writes it.
         private function _toNumbers(list:Array):Vector.<Number>
         {
-            var out:Vector.<Number> = new Vector.<Number>(list.length, false);
-            for (var i:int = 0; i < list.length; i++) out[i] = Number(list[i]);
+            var out:Vector.<Number> = new Vector.<Number>(0, false);
+            for (var i:int = 0; i < list.length; i++)
+            {
+                var e:* = list[i];
+                if (e is Array || e is Vector.<Number>)
+                {
+                    var inner:Vector.<Number> = this._toNumbers(e as Array);
+                    for (var k:int = 0; k < inner.length; k++) out.push(inner[k]);
+                }
+                else
+                {
+                    out.push(Number(e));
+                }
+            }
+            return out;
+        }
+
+        private function _toInts(list:Vector.<Number>):Vector.<int>
+        {
+            var out:Vector.<int> = new Vector.<int>(list.length, false);
+            for (var i:int = 0; i < list.length; i++) out[i] = int(list[i]);
             return out;
         }
 

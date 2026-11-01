@@ -115,8 +115,10 @@ package
                 // This is the AIR / default-build answer and it is NOT a failure:
                 // the enhancement is opt-in and the red line says the absence must
                 // be stated, not approximated (native-shader.md §8).
-                trace("shader-m30 NO-CHANNEL: " + RendererFactory.describe());
-                trace("shader-m30 OK (channel absent, reported loudly; --features native-shader enables it)");
+                // logLine (System.output), not trace: adl forwards nothing from
+                // trace() on macOS, so the loudest possible report would vanish.
+                logLine("shader-m30 NO-CHANNEL: " + RendererFactory.describe());
+                logLine("shader-m30 OK (channel absent, reported loudly; --features native-shader enables it)");
                 this.finish();
                 return;
             }

@@ -3979,3 +3979,82 @@ demo 侧不手写清单：`apps/<demo>/features` 与 `apps/<demo>/extra-roots` �
   这一轮只证明了通路，**没有证明海洋**。
 - `RawShaderMaterial`（不注入任何前导）、UBO（`layout(std140) uniform`）：未做，`ShaderMaterial`
   足够覆盖 three.js 的 `ShaderMaterial` 用法。
+
+---
+
+## 38. M31 能力矩阵 + M32 第一片 FFT 海洋（D187–D191、R71–R73，2026-11-02）
+
+§37 把通路钉死了，但它画的是一张 2×2 四边形、写的是**后台缓冲**。Ultra-Water 要的东西一样都不在里面：
+浮点渲染目标、MRT 两个附件、`texelFetch`、整数哈希、深度附件、顶点纹理取值。§38 补这两步：
+`apps/shader-m31` 是**能力矩阵**（一次把六项能力各自单独证明），`apps/ocean-m32` 是**第一次真的海水**
+（Tessendorf FFT + 顶点位移 + MRT 位移/法线）。
+
+### 38.1 M31：六项能力，逐项单独证明
+
+判定原则与 §37.6 一致——**结构通过不算通过，读回像素对才算**。所以每一项都配一个能把「错」与「对」
+分开的可观测差值：
+
+| 能力 | 断言 | 为什么这条差值能分辨 |
+|---|---|---|
+| 浮点 RT 可渲染 | 32F / 16F 两张目标都写 `100.0`，读回绿通道 `100` | 8 位目标会把 100.0 与 1.0 都变成 1；只有真浮点能存 >1 |
+| **fp16 真的丢位** | 写 `1 + 1/4096`：32F 读回蓝 `255`，16F 读回蓝 `0` | fp16 在 1.0 处 ulp = 1/1024，这条差值正好跨过相邻可表示值；若 16F 被悄悄当 32F 用，两者会一样 |
+| MRT 两附件 | 附件 0 = 红、附件 1 = 绿，分别读回 | 把两张图绑成一张会读到同一个颜色 |
+| `texelFetch` | 读**非中心** texel（偏移 5,5）得 `100` | 归一化 `texture()` 在这里会读到邻近 texel 的平均=0 |
+| `uvec2` 位运算哈希（PCG） | 种子 1337/1338 读回 `255`/`177` | 走 `setUniform1f` 传整数会得到位模式（`1337.0` 的尾数），两个种子会产生同一条输出 |
+| 深度纹理**作附件** | z=-0.5 红色先画；z=0.9 绿色必须被拒；z=-0.9 蓝色必须通过 | 只测「被拒」无法区分「深度没工作」与「那张图根本没画」——第三条是**正对照** |
+
+顶点 z 直接以字面量注入 GLSL（`@Z@`）而不是走 uniform，是为了让失败**只能**归因于深度附件本身。
+
+### 38.2 M32：`apps/ocean-m32` 的 FFT 链
+
+形状照 `OceanSim.js` 搬，规模砍到能在 AS3 里逐帧跑：
+
+```
+wind spectrum h0(k)          ──1 pass──►  h0 (RG32F, 256²)
+ evolve h(k,t)=h0·e^{iωt} + conj(h0(-k))·e^{-iωt}   ──1 pass/cascade──► (bit-reversal 折进这一趟)
+ FFT 行 → FFT 列（radix-2 DIT，8 级 × 2）            ──16 pass/cascade──►
+ assemble（(-1)^{x+y} 修正 + 位移/法线打包）          ──1 pass/cascade, MRT──► disp + normal
+ surface（顶点纹理取值位移 + Fresnel/天空/太阳/泡沫）   ──1 pass──►
+```
+
+- **级联**：`600 m` 与 `85 m` 两档，`uDisp0/1`、`uNorm0/1` 各一张图，顶点里按世界坐标取两次再叠加。
+  细档在自身 patch 外**按距离淡出**（`smoothstep(0.35,0.5,max(|w-0.5|))`）——一开始用 `clamp`，结果细档
+  的边界 texel 被整片拉伸，海里出现一块「冻住的方格」，视觉上一眼就能看出。
+- **整数 uniform**：`uStage`（FFT 级）、`uVertical`（行/列）、`uSeed` 必须走 `setUniformInts`。这是
+  §38.3 缺陷 3 的直接后果。
+- **验收**：读回位移图，把 R 通道当有符号高度看极差——`-1.64..1.56 m`（spread 204/255）；平面会读成 0。
+  断言只有一条，但它盯的是「整条 FFT 链是否真的在动」，比逐级读回更抗实现漂移。
+- **视觉**：14 m/s 风、海况 1.8、相机 (0,14,95) 看向 (0,2,0)，能看出涌浪、浪尖高光与泡沫。天空仍是
+  单色 clear colour ——**天空梯度 / 大气 LUT 未做**，与 Ultra-Water 的差距主要在那一块。
+
+### 38.3 这一轮暴露的三个真缺陷
+
+| # | 症状 | 根因 | 修法 |
+|---|---|---|---|
+| 1 | 读回**对**，但下一帧崩在 Metal 内部（`MTLResourceListAddResource`、`method cache corrupted`），像「Metal 的 bug」 | `Context3D.drawToBitmapData` 按**后台缓冲**尺寸遍历，索引却写进**目标位图**大小的缓冲：960×600 后台缓冲 → 256×256 位图，写穿 1.1 MB（`as3compiler/src/emit.ts`） | 拷贝按 `min(后台缓冲, 目标位图)` 裁剪，只填重叠的左上区域 |
+| 2 | 深度附件「挂上了但不起作用」：几何不分前后，零报错 | 深度**仅**格式（`DEPTH_32F`）时，Metal 管线描述子把 `stencilAttachmentPixelFormat` 留在默认值 → 校验直接拒；更隐蔽的是管线通过、render pass 仍给 stencil 附件赋值时，Metal **整条忽略深度附件** | `stage3d_glue.mm`：非打包格式（非 `Depth32Float_Stencil8`）时 PSO 的 stencil 格式设 `MTLPixelFormatInvalid`，且只在打包格式时才给 `rp.stencilAttachment.texture` 赋值 |
+| 3 | 整数 uniform 传 2，shader 里读到 `1073741824` | `setUniform1f` 写的是**位模式**，float 2.0 的位模式当 int 读就是 1073741824 | 反射表补 `components`/`base_type`/`size`；`base_type` 是 int/uint/bool 时走 `setUniformInts` |
+
+第 1 条最值得记：它从**第一个读回探针**起就存在，所有探针都在读回后立刻退出，堆损坏没来得及显形；
+直到 34 pass/帧的海洋在同一进程里继续跑，才在**别处**炸出来。教训是「读回探针必须继续跑几帧」——
+M31/M32 现在都这么做了。
+
+### 38.4 通道约束（引擎侧必须遵守，对应编译器文档 §6.9）
+
+- **顶点属性给 `layout(location = N)`**：不给时 SPIRV-Cross 生成的 `vs_main_in` 没有 `[[attribute]]`，
+  MSL 编译直接失败。
+- **别写读 uniform 的 GLSL 辅助函数**：SPIRV-Cross 会把 `constant` 地址空间的引用绑到 `thread` 参数上，
+  Metal 拒译。内联，或先抄进局部变量。
+- **不要给空渲染目标集提交绘制**：`setRenderTargets([], null)` 会让 Metal 绘制中止；读后台缓冲用
+  `setBackBuffer()`。
+- **字段别遮蔽 `Stage3DApp._renderer`**：demo 里用 `_nr:NativeShaderRenderer` + `_native = _nr.context3DNative`，
+  否则拿 `AGALRenderer` 类型去访问 `context3DNative` 是编译期就错的。
+- **读回放在 `afterFrame`**：`drawToBitmapData` 会 flush 当前 command buffer，别再插到一帧中间。
+
+### 38.5 规则（R71–R73）
+
+- **R71**：读回探针**必须**在读回后继续跑若干帧再退出——只读一次就退的探针测不出写越界（§38.3 缺陷 1）。
+- **R72**：纹理的**采样语义**由它在 GLSL 里的声明类型决定，不由绑定时的资源决定；深度纹理因此只能作
+  **渲染附件**，要读线性深度就渲染进彩色浮点图。
+- **R73**：凡是「绑了但没生效」的路径（深度附件、未被读的 uniform、被裁掉的反射项），**必须**有一条
+  正对照断言；只测「被拒/为黑」无法区分「功能没工作」与「根本没画」。

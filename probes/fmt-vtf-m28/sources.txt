@@ -1,0 +1,9 @@
+# Extra AS3 sources for this probe, one path per line (relative to the repo root).
+#
+# The default runner hands every probe all of kit/ + seam/. That breaks THIS probe
+# for a reason that has nothing to do with what it measures: the engine also has a
+# class named `Texture` (asaot.three.textures.Texture), and the compile面 resolves
+# the probe's `flash.display3D.textures.Texture` to it. The probe is deliberately
+# engine-free -- it drives raw Stage3D the way a renderer would -- so it only needs
+# the AGAL assembler.
+seam/com/adobe/utils/AGALMiniAssembler.as

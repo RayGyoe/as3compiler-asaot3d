@@ -33,6 +33,8 @@ temp/
 apps/pbr-cube/PBRCube
 apps/rotating-cube/RotatingCube
 apps/shader-m30/ShaderM30
+apps/shader-m31/ShaderM31
+apps/ocean-m32/OceanM32
 apps/texture-maps/TextureMaps
 apps/loader-scene/LoaderScene
 apps/asset-load/AssetLoad
