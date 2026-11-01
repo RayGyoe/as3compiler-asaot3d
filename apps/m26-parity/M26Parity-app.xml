@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8" standalone="no" ?>
+<application xmlns="http://ns.adobe.com/air/application/51.1">
+
+    <!-- M26 parity harness (three-api-design.md §32). The size is small and
+         FIXED on purpose: AOT gives the stage the descriptor's client area, so
+         400x300 means the render is 400x300 exactly, with no titlebar and no
+         capture scaling between the renderer and the measured pixels. Pair it
+         with tools/refscene/walk-m26.html?w=400&h=300. -->
+
+    <id>com.asaot.three.example.M26Parity</id>
+    <filename>M26Parity</filename>
+    <name>M26Parity</name>
+    <versionNumber>0.0.1</versionNumber>
+
+    <supportedProfiles>extendedDesktop</supportedProfiles>
+
+    <initialWindow>
+        <content>build/M26Parity.swf</content>
+        <renderMode>direct</renderMode>
+        <depthAndStencil>true</depthAndStencil>
+        <width>400</width>
+        <height>300</height>
+        <visible>true</visible>
+        <requestedDisplayResolution>high</requestedDisplayResolution>
+    </initialWindow>
+
+</application>

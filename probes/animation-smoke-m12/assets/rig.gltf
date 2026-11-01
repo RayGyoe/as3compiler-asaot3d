@@ -1,0 +1,225 @@
+{
+ "asset": {
+  "version": "2.0",
+  "generator": "asaot3d m12 probe rig"
+ },
+ "scene": 0,
+ "scenes": [
+  {
+   "nodes": [
+    0
+   ]
+  }
+ ],
+ "nodes": [
+  {
+   "name": "root",
+   "children": [
+    1,
+    2,
+    3
+   ]
+  },
+  {
+   "name": "bone0",
+   "translation": [
+    0,
+    0,
+    0
+   ]
+  },
+  {
+   "name": "bone1",
+   "translation": [
+    1,
+    0,
+    0
+   ]
+  },
+  {
+   "name": "body",
+   "mesh": 0,
+   "skin": 0
+  }
+ ],
+ "skins": [
+  {
+   "joints": [
+    1,
+    2
+   ],
+   "inverseBindMatrices": 5
+  }
+ ],
+ "meshes": [
+  {
+   "name": "riggedTri",
+   "weights": [
+    0.0
+   ],
+   "primitives": [
+    {
+     "attributes": {
+      "POSITION": 0,
+      "JOINTS_0": 1,
+      "WEIGHTS_0": 2
+     },
+     "targets": [
+      {
+       "POSITION": 4
+      }
+     ],
+     "mode": 4
+    }
+   ]
+  }
+ ],
+ "animations": [
+  {
+   "name": "rigAnim",
+   "samplers": [
+    {
+     "input": 6,
+     "output": 7,
+     "interpolation": "LINEAR"
+    },
+    {
+     "input": 8,
+     "output": 9,
+     "interpolation": "LINEAR"
+    }
+   ],
+   "channels": [
+    {
+     "sampler": 0,
+     "target": {
+      "node": 2,
+      "path": "rotation"
+     }
+    },
+    {
+     "sampler": 1,
+     "target": {
+      "node": 3,
+      "path": "weights"
+     }
+    }
+   ]
+  }
+ ],
+ "accessors": [
+  {
+   "bufferView": 0,
+   "componentType": 5126,
+   "count": 3,
+   "type": "VEC3"
+  },
+  {
+   "bufferView": 1,
+   "componentType": 5121,
+   "count": 3,
+   "type": "VEC4"
+  },
+  {
+   "bufferView": 2,
+   "componentType": 5126,
+   "count": 3,
+   "type": "VEC4"
+  },
+  {
+   "bufferView": 3,
+   "componentType": 5126,
+   "count": 3,
+   "type": "VEC3"
+  },
+  {
+   "bufferView": 3,
+   "componentType": 5126,
+   "count": 3,
+   "type": "VEC3"
+  },
+  {
+   "bufferView": 4,
+   "componentType": 5126,
+   "count": 2,
+   "type": "MAT4"
+  },
+  {
+   "bufferView": 5,
+   "componentType": 5126,
+   "count": 2,
+   "type": "SCALAR"
+  },
+  {
+   "bufferView": 6,
+   "componentType": 5126,
+   "count": 2,
+   "type": "VEC4"
+  },
+  {
+   "bufferView": 7,
+   "componentType": 5126,
+   "count": 2,
+   "type": "SCALAR"
+  },
+  {
+   "bufferView": 8,
+   "componentType": 5126,
+   "count": 2,
+   "type": "SCALAR"
+  }
+ ],
+ "bufferViews": [
+  {
+   "buffer": 0,
+   "byteOffset": 0,
+   "byteLength": 36
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 36,
+   "byteLength": 12
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 48,
+   "byteLength": 48
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 96,
+   "byteLength": 36
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 132,
+   "byteLength": 128
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 260,
+   "byteLength": 8
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 268,
+   "byteLength": 32
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 300,
+   "byteLength": 8
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 308,
+   "byteLength": 8
+  }
+ ],
+ "buffers": [
+  {
+   "byteLength": 316,
+   "uri": "data:application/octet-stream;base64,AAAAAAAAAAAAAAAAAACAPwAAAAAAAAAAAAAAAAAAgD8AAAAAAAAAAAAAAAABAAAAAACAPwAAAAAAAAAAAAAAAAAAgD8AAAAAAAAAAAAAAAAAAIA/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAIA/AAAAAAAAAAAAAIA/AAAAAAAAAAAAAIA/AACAPwAAAAAAAAAAAAAAAAAAAAAAAIA/AAAAAAAAAAAAAAAAAAAAAAAAgD8AAAAAAAAAAAAAAAAAAAAAAACAPwAAgD8AAAAAAAAAAAAAAAAAAAAAAACAPwAAAAAAAAAAAAAAAAAAAAAAAIA/AAAAAAAAgL8AAAAAAAAAAAAAgD8AAAAAAACAPwAAAAAAAAAAAAAAAAAAgD8AAAAAAAAAAPMENT/zBDU/AAAAAAAAgD8AAAAAAACAPw=="
+  }
+ ]
+}

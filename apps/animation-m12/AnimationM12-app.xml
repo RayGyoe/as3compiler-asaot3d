@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="utf-8" standalone="no" ?>
+<application xmlns="http://ns.adobe.com/air/application/51.1">
+
+    <!-- M12 acceptance demo: the animation family (KeyframeTrack / AnimationClip
+         / AnimationMixer / AnimationAction) driving keyframe TRS, a morph target
+         and a CPU-skinned tentacle. Same envelope as the other asaot3d demos
+         (extendedDesktop + direct + depth/stencil). -->
+
+    <id>com.asaot.three.example.AnimationM12</id>
+    <filename>AnimationM12</filename>
+    <name>AnimationM12</name>
+    <versionNumber>0.0.1</versionNumber>
+
+    <supportedProfiles>extendedDesktop</supportedProfiles>
+
+    <initialWindow>
+        <content>build/AnimationM12.swf</content>
+        <renderMode>direct</renderMode>
+        <depthAndStencil>true</depthAndStencil>
+        <width>720</width>
+        <height>360</height>
+        <visible>true</visible>
+        <requestedDisplayResolution>high</requestedDisplayResolution>
+    </initialWindow>
+
+</application>

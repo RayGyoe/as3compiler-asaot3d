@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8" standalone="no" ?>
+<application xmlns="http://ns.adobe.com/air/application/51.1">
+
+    <!-- Kept at the app root (next to src/) so both launchers agree: adl resolves
+         <content> from here, and `as-aot --air-app` treats this directory as the app
+         root, scanning src/ and writing InteractionM14.build.json beside it. -->
+
+    <id>com.asaot.three.example.InteractionM14</id>
+    <filename>InteractionM14</filename>
+    <name>InteractionM14</name>
+    <versionNumber>0.0.1</versionNumber>
+
+    <!-- Stage3D needs the extended-desktop profile, direct rendering and a
+         depth/stencil buffer. -->
+    <supportedProfiles>extendedDesktop</supportedProfiles>
+
+    <initialWindow>
+        <content>build/InteractionM14.swf</content>
+        <renderMode>direct</renderMode>
+        <depthAndStencil>true</depthAndStencil>
+        <width>960</width>
+        <height>720</height>
+        <visible>true</visible>
+        <requestedDisplayResolution>high</requestedDisplayResolution>
+    </initialWindow>
+
+</application>

@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8" standalone="no" ?>
+<application xmlns="http://ns.adobe.com/air/application/51.1">
+
+    <!-- M26: the three.js `webgl_animation_walk` port. The window is wide rather
+         than square because the character stays on a horizontal plane: 1000x800
+         gives the 45-degree camera room to show the floor grid around it. -->
+
+    <id>com.asaot.three.example.WalkM26</id>
+    <filename>WalkM26</filename>
+    <name>WalkM26</name>
+    <versionNumber>0.0.1</versionNumber>
+
+    <supportedProfiles>extendedDesktop</supportedProfiles>
+
+    <initialWindow>
+        <content>build/WalkM26.swf</content>
+        <renderMode>direct</renderMode>
+        <depthAndStencil>true</depthAndStencil>
+        <width>1000</width>
+        <height>800</height>
+        <visible>true</visible>
+        <requestedDisplayResolution>high</requestedDisplayResolution>
+    </initialWindow>
+
+</application>

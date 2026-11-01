@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8" standalone="no" ?>
+<application xmlns="http://ns.adobe.com/air/application/51.1">
+
+    <!-- M24: asaotui control panel over a Stage3D scene. Window is 1200x900: the
+         panel keeps 300px on the right, the Stats HUD sits top-left, and the rest
+         is the 3D view. -->
+
+    <id>com.asaot.three.example.PanelM24</id>
+    <filename>PanelM24</filename>
+    <name>PanelM24</name>
+    <versionNumber>0.0.1</versionNumber>
+
+    <!-- Stage3D needs the extended-desktop profile, direct rendering and a
+         depth/stencil buffer: the shadow pass renders its own depth map. -->
+    <supportedProfiles>extendedDesktop</supportedProfiles>
+
+    <initialWindow>
+        <content>build/PanelM24.swf</content>
+        <renderMode>direct</renderMode>
+        <depthAndStencil>true</depthAndStencil>
+        <width>1200</width>
+        <height>900</height>
+        <visible>true</visible>
+        <requestedDisplayResolution>high</requestedDisplayResolution>
+    </initialWindow>
+
+</application>

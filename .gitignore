@@ -1,0 +1,66 @@
+# macOS
+.DS_Store
+
+# Node
+node_modules/
+
+# 编译产物：AS3 源码 -> 可读 C -> 原生可执行 / wasm。
+# asaot3d 没有手写的 .c（框架是 kit/、seam/ 的 .as，工具是 tools/ 的 .js），
+# 所有 .c 都是 as-aot 从 .as 生成的，与 .o/.wasm 一样可再生成、不入库。
+*.c
+*.o
+*.wasm
+
+# 构建输出目录（apps/*/build/ 里的 .swf 由 mxmlc 生成）
+build/
+
+# three.js 上游外部克隆（含嵌套 .git，部分克隆）。这是「借图」API 设计的参考
+# 源码，不是本仓库的构建输入；对齐结论记录在 three-borrow-map.md /
+# three-api-design.md，源码可随时从 upstream 重新 clone。整目录排除，避免内嵌
+# .git 被父仓库当成 gitlink（mode 160000，只存一个 hash、不存内容）。
+three-src/
+
+# 本地运行证据 / 探针产物（.log/.png/.exe/.c）。可丢、不入库；asaot3d 跑门/探针/
+# 截图复核产生的临时文件一律写这里，与 as3compiler 的 temp/ 同口径。
+temp/
+
+# apps/ 里 AOT 编译出的原生可执行文件（无扩展名，与 -app.xml 的 <filename> 对应）。
+# 源文件（src/*.as、*-app.xml）保留；生成的 .c 已被上方 *.c 规则忽略。
+# 新增 app 时在此同步补一条（与 as3compiler 精确列出 example 可执行文件同口径）。
+apps/pbr-cube/PBRCube
+apps/rotating-cube/RotatingCube
+apps/texture-maps/TextureMaps
+apps/loader-scene/LoaderScene
+apps/asset-load/AssetLoad
+apps/light-m6/LightM6
+apps/shadow-m7/ShadowM7
+apps/gltf-m8/GLTFM8
+apps/env-m9/EnvM9
+apps/alpha-m10/AlphaM10
+apps/geometry-m11/GeometryM11
+apps/animation-m12/AnimationM12
+apps/shadow-m13/ShadowM13
+apps/interaction-m14/InteractionM14
+apps/stats-m15/StatsM15
+apps/texstate-m17/TexStateM17
+apps/uv-m18/UVM18
+apps/renderstate-m19/RenderStateM19
+apps/scene-m20/SceneM20
+apps/panel-m24/PanelM24
+apps/cubeface-m25/CubeFaceM25
+apps/hdr-m25/HdrM25
+apps/walk-m26/WalkM26
+apps/m26-parity/M26Parity
+
+# --air-app 生成的构建清单：写在它读的 -app.xml 描述符旁、以 <filename> 命名，
+# 内部路径相对描述符解析（../../../as3compiler/...），每次运行都被重写，属平台
+# 相关快照、从非手写。手写的清单不同、保持跟踪（probes/*/*.build.json 在 .as 旁、
+# 无 -app.xml，是直接喂给 as-aot 的手写配置）。口径同 as3compiler 的
+# examples/*.build.json（手写）与 examples/air-native/air-native.build.json
+# （--air-app 生成）的分野。
+apps/*/*.build.json
+
+# `build.sh` 在两份产物旁各建一个指向仓库 assets/ 的符号链接（AOT 在可执行文件旁、
+# AIR 在 build/ 里），供 `app:/assets/...` 解析。它是构建期产物、且 ln -sfn 落的是
+# 本机绝对路径，入库只会让克隆者拿到一条断链；每次 build.sh 都会重建。
+apps/*/assets

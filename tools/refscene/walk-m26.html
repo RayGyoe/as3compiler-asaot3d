@@ -1,0 +1,221 @@
+<!DOCTYPE html>
+<!--
+  tools/refscene/walk-m26.html -- the three.js GROUND TRUTH for apps/walk-m26.
+
+  Why this exists: apps/walk-m26 is a port of three.js `webgl_animation_walk`.
+  "Is our port right?" cannot be answered by comparing AOT against AIR -- both
+  run OUR renderer, so they agree with each other while both being wrong. This
+  page runs the reference implementation itself, in a real browser, at the same
+  1000x800 stage size, and exposes the same box statistic our screenshots use.
+
+  Usage (from asaot3d/, the server must be rooted here so /assets resolves):
+      python3 -m http.server 8791 --bind 127.0.0.1
+      open http://127.0.0.1:8791/tools/refscene/walk-m26.html
+      # then, in the devtools console (or through a CDP driver):
+      __stats([0.44,0.44,0.56,0.62])   // -> {mean,p50,p90,p99,max,n} of luma
+
+  Query switches (A/B knobs, all default off):
+      ?t=<seconds>   pin the pose at that animation time (default 0). The pose is
+                     ALWAYS frozen here -- no per-frame mixer.update -- because a
+                     moving pose makes a region mean a function of wall-clock time.
+      ?fog=0         scene.fog = null, to separate the fog path from the BRDF.
+      ?nonormal=1    drop the body's normalMap, to separate the normal path.
+      ?w=400&h=300   render at another stage size (pair it with apps/m26-parity,
+                     which renders exactly that many pixels and reads them back).
+      ?floor=plain   untextured grey floor, to separate "texture sampling is
+                     wrong" from "lighting is wrong" (mirrors PARITY_FLOOR_PLAIN).
+      ?floor=solid   a 1x1 sRGB 0x808080 texture instead of the checkerboard: the
+                     albedo still goes through the texture->sRGB decode path, but
+                     there are no mips, no wrap and no spatial averaging, so a
+                     remaining delta is decode while a vanishing one is
+                     mip/anisotropy (mirrors PARITY_FLOOR_SOLID).
+      ?noshadow=1    renderer.shadowMap.enabled = false (mirrors PARITY_NO_SHADOW).
+      ?floorlevel=N  level written into the ?floor=solid 1x1 texture (default 128).
+      ?floorcolor=RRGGBB  material.color of the floor (default: 0x808080 for
+                     ?floor=plain, 0x404040 otherwise -- i.e. the reference tint).
+      ?repeat=N      checkerboard tiling (default 16 = the reference value). repeat=1
+                     magnifies the texture, so NOTHING is minified and the mip/aniso
+                     path drops out -- it splits "mip averaging" from "decode".
+      ?floornormal=0 drop the FLOOR's normalMap (mirrors PARITY_FLOOR_NO_NORMAL);
+                     pairs with ?floor=solid to split "albedo decode" from
+                     "perturbed normal" without a texture in the way.
+
+  Compare against an AOT/AIR screenshot with tools/refscene/boxstats.mjs, which
+  uses the identical fractional-box convention (and the titlebar offset: AOT
+  captures carry ~32 CSS px of titlebar, AIR/adl none).
+-->
+<html><head><meta charset="utf-8"><title>walk-m26 reference (three.js ground truth)</title>
+<style>html,body{margin:0;padding:0;overflow:hidden;background:#5e5d5d}canvas{display:block}</style>
+<script type="importmap">
+{"imports":{"three":"https://unpkg.com/three@0.187.0/build/three.module.js",
+            "three/addons/":"https://unpkg.com/three@0.187.0/examples/jsm/"}}
+</script>
+</head><body>
+<script>
+// Diagnostic: a module script that fails to RESOLVE (bad import map / offline
+// unpkg) never runs and never fetches, which is invisible from outside -- the
+// page just stays blank. This records what actually happened so a driver can
+// report it instead of guessing.
+window.__errs = [];
+addEventListener('error', function (e) {
+  window.__errs.push(String((e && (e.message || e.type)) || 'unknown'));
+}, true);
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+// Size is a query knob (?w=&h=) so the reference can be rendered at the SAME
+// stage size as a deterministic AOT readback (apps/m26-parity renders 400x300
+// and reads the back buffer, so nothing sits between the renderer and the
+// number -- see three-api-design.md §32).
+const _q = new URLSearchParams( location.search );
+const W = Number( _q.get( 'w' ) || 1000 ), H = Number( _q.get( 'h' ) || 800 );
+const PI90 = Math.PI / 2;
+
+const camera = new THREE.PerspectiveCamera( 45, W / H, 0.1, 100 );
+camera.position.set( 0, 2, - 5 );
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color( 0x5e5d5d );
+scene.fog = new THREE.Fog( 0x5e5d5d, 2, 20 );
+if ( new URLSearchParams( location.search ).get( 'fog' ) === '0' ) scene.fog = null;
+
+const group = new THREE.Group(); scene.add( group );
+const followGroup = new THREE.Group(); scene.add( followGroup );
+
+const dirLight = new THREE.DirectionalLight( 0xffffff, 5 );
+dirLight.position.set( - 2, 5, - 3 );
+dirLight.castShadow = true;
+const cam = dirLight.shadow.camera;
+cam.top = cam.right = 2; cam.bottom = cam.left = - 2; cam.near = 3; cam.far = 8;
+dirLight.shadow.mapSize.set( 1024, 1024 );
+followGroup.add( dirLight ); followGroup.add( dirLight.target );
+
+const renderer = // preserveDrawingBuffer is what lets __stats read the canvas outside the
+  // animation frame; without it every drawImage() sees a cleared buffer.
+  new THREE.WebGLRenderer( { antialias: true, preserveDrawingBuffer: true } );
+renderer.setPixelRatio( 1 );
+renderer.setSize( W, H );
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 0.5;
+renderer.shadowMap.enabled = ( _q.get( 'noshadow' ) !== '1' );
+renderer.shadowMap.type = THREE.PCFShadowMap;
+document.body.appendChild( renderer.domElement );
+
+const controls = new OrbitControls( camera, renderer.domElement );
+controls.target.set( 0, 1, 0 );
+controls.enableDamping = true;
+controls.enablePan = false;
+controls.maxPolarAngle = PI90 - 0.05;
+controls.update();
+
+// floor: identical to addFloor() in the reference
+const size = 50, repeat = parseInt( _q.get( 'repeat' ) || '16', 10 );
+const floorT = new THREE.TextureLoader().load( '/assets/textures/floors/FloorsCheckerboard_S_Diffuse.jpg' );
+floorT.colorSpace = THREE.SRGBColorSpace;
+floorT.repeat.set( repeat, repeat );
+floorT.wrapS = floorT.wrapT = THREE.RepeatWrapping;
+floorT.anisotropy = renderer.capabilities.getMaxAnisotropy();
+const floorN = new THREE.TextureLoader().load( '/assets/textures/floors/FloorsCheckerboard_S_Normal.jpg' );
+floorN.repeat.set( repeat, repeat );
+floorN.wrapS = floorN.wrapT = THREE.RepeatWrapping;
+floorN.anisotropy = renderer.capabilities.getMaxAnisotropy();
+const FLOOR = _q.get( 'floor' ) || 'map';
+const PLAIN = FLOOR === 'plain';
+// One texel, mid sRGB grey: same decode path as the checkerboard, no mips, no
+// wrapping, no spatial averaging.
+const FLOOR_LEVEL = parseInt( _q.get( 'floorlevel' ) || '128', 10 );
+// The mapped floor is a dark 0x404040 tint over the checkerboard; the plain one
+// is mid grey, so the default follows the mode unless ?floorcolor= overrides it.
+const FLOOR_COLOR = parseInt(
+  _q.get( 'floorcolor' ) || ( FLOOR === 'plain' ? '0x808080' : '0x404040' ), 16 );
+const solidT = new THREE.DataTexture( new Uint8Array( [ FLOOR_LEVEL, FLOOR_LEVEL, FLOOR_LEVEL, 255 ] ), 1, 1 );
+solidT.colorSpace = THREE.SRGBColorSpace;
+solidT.needsUpdate = true;
+const SOLID = FLOOR === 'solid';
+const FLOOR_NO_NORMAL = _q.get( 'floornormal' ) === '0';
+const mat = new THREE.MeshStandardMaterial( PLAIN
+  ? { color: FLOOR_COLOR, roughness: 0.85, depthWrite: false }
+  : Object.assign(
+    { color: FLOOR_COLOR, depthWrite: false, roughness: 0.85 },
+    FLOOR_NO_NORMAL ? {} : { normalMap: floorN, normalScale: new THREE.Vector2( 0.5, 0.5 ) },
+    { map: SOLID ? solidT : floorT } ) );
+const g = new THREE.PlaneGeometry( size, size, 50, 50 );
+g.rotateX( - PI90 );
+const floor = new THREE.Mesh( g, mat );
+floor.receiveShadow = true;
+scene.add( floor );
+
+new GLTFLoader().load( '/assets/models/gltf/Soldier.glb', ( gltf ) => {
+  const model = gltf.scene;
+  group.add( model );
+  model.rotation.y = Math.PI; group.rotation.y = Math.PI;
+  model.traverse( ( object ) => {
+    if ( ! object.isMesh ) return;
+    if ( object.name === 'vanguard_Mesh' ) {
+      object.castShadow = true; object.receiveShadow = true;
+      object.material.metalness = 1.0; object.material.roughness = 0.2;
+      object.material.color.set( 1, 1, 1 );
+      // webgl_animation_walk drives metalness from the base-colour map's blue
+      // channel; apps/walk-m26 and apps/m26-parity copy that. It is a query
+      // knob here so the two setups can be measured against each other.
+      if ( _q.get( 'metalmap' ) !== '0' ) object.material.metalnessMap = object.material.map;
+      // ?mat=diffuse swaps the metal body for a plain rough dielectric, to
+      // separate "our specular is wrong" from "our lighting baseline is wrong".
+      if ( _q.get( 'mat' ) === 'diffuse' ) {
+        object.material.metalness = 0.0; object.material.roughness = 0.9;
+        object.material.metalnessMap = null; object.material.roughnessMap = null;
+        object.material.color.set( 0x808080 );
+      }
+      if ( new URLSearchParams( location.search ).get( 'nonormal' ) === '1' ) {
+        object.material.normalMap = null; object.material.needsUpdate = true;
+      }
+    } else {
+      object.material.metalness = 1; object.material.roughness = 0;
+      object.material.transparent = true; object.material.opacity = 0.8;
+      object.material.color.set( 1, 1, 1 );
+    }
+  } );
+  const mixer = new THREE.AnimationMixer( model );
+  const idle = mixer.clipAction( gltf.animations[ 0 ] );
+  idle.play();
+  // FROZEN: the pose is pinned (no per-frame mixer.update) so a region mean is
+  // a function of the renderer, not of the animation phase.
+  const FREEZE = Number( new URLSearchParams( location.search ).get( 't' ) || 0 );
+  mixer.update( FREEZE );
+  let n = 0;
+  renderer.setAnimationLoop( () => { controls.update(); renderer.render( scene, camera );
+    if ( ++n === 5 ) window.__ready = true; } );
+
+  // Diagnostic handles: the scene graph is otherwise unreachable from the
+  // console, which makes "which mesh is that bright patch?" unanswerable. Used
+  // by the M26-R1b bisection (hide one mesh, re-read the same box).
+  window.__scene = scene; window.__renderer = renderer; window.__camera = camera;
+  window.__names = () => { const o = []; scene.traverse( ( x ) => { if ( x.isMesh ) o.push( x.name || '(unnamed)' ); } ); return o.filter( ( v, i, a ) => a.indexOf( v ) === i ); };
+  window.__only = ( name ) => { scene.traverse( ( x ) => { if ( x.isMesh ) x.visible = ( name === null ) || x.name === name; } ); };
+
+  // Region mean over a fractional box of the canvas -- the same statistic
+  // temp/cmpbox.mjs prints for a screenshot, but read from the live canvas so
+  // there is no window titlebar / capture scaling in the way.
+  window.__stats = ( box ) => {
+    const c = renderer.domElement;
+    const cv = document.createElement( 'canvas' );
+    cv.width = c.width; cv.height = c.height;
+    const ctx = cv.getContext( '2d' );
+    ctx.drawImage( c, 0, 0 );
+    const x0 = Math.round( box[0] * c.width ), x1 = Math.round( box[2] * c.width );
+    const y0 = Math.round( box[1] * c.height ), y1 = Math.round( box[3] * c.height );
+    const d = ctx.getImageData( x0, y0, x1 - x0, y1 - y0 ).data;
+    const l = [];
+    let m = 0;
+    for ( let i = 0; i < d.length; i += 4 ) { const v = 0.2126*d[i] + 0.7152*d[i+1] + 0.0722*d[i+2]; l.push(v); m += v; }
+    l.sort( ( a, b ) => a - b );
+    const q = ( f ) => l[ Math.min( l.length - 1, Math.floor( f * l.length ) ) ];
+    return { mean: m / l.length, p50: q( 0.5 ), p90: q( 0.9 ), p99: q( 0.99 ), max: l[l.length-1], n: l.length };
+  };
+} );   // <- closes the GLTFLoader callback opened at `( gltf ) => {`
+
+</script>
+</body></html>

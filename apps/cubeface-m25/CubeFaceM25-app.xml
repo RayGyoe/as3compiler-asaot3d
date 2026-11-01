@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8" standalone="no" ?>
+<application xmlns="http://ns.adobe.com/air/application/51.1">
+
+    <!-- Cube-face orientation probe (M25 prerequisite).
+         Same envelope as the other asaot3d demos (extendedDesktop + direct +
+         depth/stencil). -->
+
+    <id>com.asaot.three.example.CubeFaceM25</id>
+    <filename>CubeFaceM25</filename>
+    <name>CubeFaceM25</name>
+    <versionNumber>0.0.1</versionNumber>
+
+    <supportedProfiles>extendedDesktop</supportedProfiles>
+
+    <initialWindow>
+        <content>build/CubeFaceM25.swf</content>
+        <renderMode>direct</renderMode>
+        <depthAndStencil>true</depthAndStencil>
+        <width>720</width>
+        <height>360</height>
+        <visible>true</visible>
+        <requestedDisplayResolution>high</requestedDisplayResolution>
+    </initialWindow>
+
+</application>

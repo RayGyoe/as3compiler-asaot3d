@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8" standalone="no" ?>
+<application xmlns="http://ns.adobe.com/air/application/51.1">
+
+    <!-- Kept at the app root (next to src/) so both launchers agree: adl resolves
+         <content> from here, and `as-aot --air-app` treats this directory as the app
+         root, scanning src/ and writing SceneM20.build.json beside it. -->
+
+    <id>com.asaot.three.example.SceneM20</id>
+    <filename>SceneM20</filename>
+    <name>SceneM20</name>
+    <versionNumber>0.0.1</versionNumber>
+
+    <!-- Stage3D needs the extended-desktop profile, direct rendering and a
+         depth/stencil buffer: the shadow panel renders its own depth map. -->
+    <supportedProfiles>extendedDesktop</supportedProfiles>
+
+    <initialWindow>
+        <content>build/SceneM20.swf</content>
+        <renderMode>direct</renderMode>
+        <depthAndStencil>true</depthAndStencil>
+        <width>1200</width>
+        <height>900</height>
+        <visible>true</visible>
+        <requestedDisplayResolution>high</requestedDisplayResolution>
+    </initialWindow>
+
+</application>

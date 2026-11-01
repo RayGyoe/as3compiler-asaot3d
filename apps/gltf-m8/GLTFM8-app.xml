@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8" standalone="no" ?>
+<application xmlns="http://ns.adobe.com/air/application/51.1">
+
+    <!-- M8 acceptance demo: glTF 2.0 assets loaded at runtime. Same envelope as
+         the other asaot3d demos (extendedDesktop + direct + depth/stencil). -->
+
+    <id>com.asaot.three.example.GLTFM8</id>
+    <filename>GLTFM8</filename>
+    <name>GLTFM8</name>
+    <versionNumber>0.0.1</versionNumber>
+
+    <supportedProfiles>extendedDesktop</supportedProfiles>
+
+    <initialWindow>
+        <content>build/GLTFM8.swf</content>
+        <renderMode>direct</renderMode>
+        <depthAndStencil>true</depthAndStencil>
+        <width>720</width>
+        <height>520</height>
+        <visible>true</visible>
+        <requestedDisplayResolution>high</requestedDisplayResolution>
+    </initialWindow>
+
+</application>

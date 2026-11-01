@@ -1,0 +1,11 @@
+# Extra SOURCE ROOTS for this demo, one per line, relative to the asaot3d root.
+#
+# Both backends consume this file (tools/build-demo.sh): --as-class-path for
+# as-aot and -source-path+= for mxmlc, so the demo cannot build on one backend
+# and miss the other.
+#
+# asaotui is a SEPARATE checkout that is linked HERE, never copied into this
+# repository: a copy is a fork (it drifts silently, and every widget fix would
+# have to be made twice). The same two roots are what asaotui's own tools pass.
+../asaotui/seam
+../asaotui/kit

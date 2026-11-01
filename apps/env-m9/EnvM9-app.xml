@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8" standalone="no" ?>
+<application xmlns="http://ns.adobe.com/air/application/51.1">
+
+    <!-- M9 acceptance demo: image-based lighting from a cube environment map.
+         Same envelope as the other asaot3d demos (extendedDesktop + direct +
+         depth/stencil). -->
+
+    <id>com.asaot.three.example.EnvM9</id>
+    <filename>EnvM9</filename>
+    <name>EnvM9</name>
+    <versionNumber>0.0.1</versionNumber>
+
+    <supportedProfiles>extendedDesktop</supportedProfiles>
+
+    <initialWindow>
+        <content>build/EnvM9.swf</content>
+        <renderMode>direct</renderMode>
+        <depthAndStencil>true</depthAndStencil>
+        <width>720</width>
+        <height>360</height>
+        <visible>true</visible>
+        <requestedDisplayResolution>high</requestedDisplayResolution>
+    </initialWindow>
+
+</application>
