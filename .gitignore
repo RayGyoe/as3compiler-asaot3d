@@ -32,6 +32,7 @@ temp/
 # 新增 app 时在此同步补一条（与 as3compiler 精确列出 example 可执行文件同口径）。
 apps/pbr-cube/PBRCube
 apps/rotating-cube/RotatingCube
+apps/shader-m30/ShaderM30
 apps/texture-maps/TextureMaps
 apps/loader-scene/LoaderScene
 apps/asset-load/AssetLoad

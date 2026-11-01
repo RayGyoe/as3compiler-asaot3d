@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8" standalone="no" ?>
+<application xmlns="http://ns.adobe.com/air/application/51.1">
+
+    <id>com.asaot.three.example.ShaderM30</id>
+    <filename>ShaderM30</filename>
+    <name>ShaderM30</name>
+    <versionNumber>0.0.1</versionNumber>
+
+    <!-- Same descriptor shape as every other demo: Stage3D needs the extended
+         desktop profile, direct rendering and a depth/stencil buffer. -->
+    <supportedProfiles>extendedDesktop</supportedProfiles>
+
+    <initialWindow>
+        <content>build/ShaderM30.swf</content>
+        <renderMode>direct</renderMode>
+        <depthAndStencil>true</depthAndStencil>
+        <width>640</width>
+        <height>480</height>
+        <visible>true</visible>
+        <requestedDisplayResolution>high</requestedDisplayResolution>
+    </initialWindow>
+
+</application>

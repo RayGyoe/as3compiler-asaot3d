@@ -1,0 +1,4 @@
+# Classes only a getDefinitionByName STRING names (E6 design §6.7).
+# RendererFactory probes for this one, so nothing in the AS3 source references
+# it and the --air-app reachability closure cannot see it.
+asaot.three.NativeShaderRenderer

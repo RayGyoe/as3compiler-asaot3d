@@ -148,6 +148,7 @@ package asaot.three
     import asaot.three.materials.LineBasicMaterial;
     import asaot.three.materials.MeshBasicMaterial;
     import asaot.three.materials.MeshStandardMaterial;
+    import asaot.three.materials.ShaderMaterial;
     import asaot.three.objects.LineSegments;
     import asaot.three.objects.Mesh;
     import asaot.three.scenes.Fog;
@@ -179,7 +180,10 @@ package asaot.three
         // same 0xA0/0xA1 encoding and instruction slots, and we emit no v4-only op).
         public static const AGAL_VERSION:int = 4;
 
-        private var _context:Context3D;
+        // protected, not private: NativeShaderRenderer (E6) is a subclass that talks
+        // to the SAME Context3D. Handing it a second one would mean a second
+        // back buffer and a second set of programs, which is not a renderer swap.
+        protected var _context:Context3D;
         // Diagnostic switch (off by default): dump the assembled fragment
         // program text -- AGAL plus the backend translation -- once per rebuilt
         // standard program, so a sampling or translation defect can be read off
@@ -194,6 +198,14 @@ package asaot.three
         public static var debugReflect:Boolean = false;
 
         private var _assembler:AGALMiniAssembler;
+
+        // E6: the camera of the frame being rendered. three.js gives every
+        // ShaderMaterial the same default uniforms (projectionMatrix /
+        // modelViewMatrix / modelMatrix / cameraPosition) without the author
+        // declaring them, and computing those needs the camera; `render()` already
+        // has it, so it is kept for the frame instead of threading a parameter
+        // through the whole draw path.
+        protected var _camera:Camera;
 
         // Two programs: unlit color (M1) and the single standard PBR program
         // (M2/M4). No per-map variants: neutral 1x1 textures make every map
@@ -724,6 +736,9 @@ package asaot.three
             // to `toneMapping` rebuilds the program set here (once) rather than
             // at assignment time -- a renderer that never renders pays nothing.
             if (this._programsDirty) this._rebuildPrograms();
+
+            // E6: kept for the frame (see the field comment).
+            this._camera = camera;
 
             // Ensure world matrices and the camera's inverse world matrix are
             // current before computing MVP matrices.
@@ -3057,6 +3072,37 @@ package asaot.three
             return edge + 1;
         }
 
+        // ------------------------------------------------------------------
+        // E6: the native-shader extension point.
+        //
+        // The base class does NOT know how to draw a ShaderMaterial, and it must
+        // not pretend to. On AIR/adl -- and in a default AOT build, where
+        // Context3DNative is not even a symbol -- there is no channel that can
+        // execute this source, and AGAL cannot express texelFetch, integer
+        // arithmetic, MRT or a float render target. The single honest answer is
+        // to throw with the material name and the exact switch that would fix
+        // it (AGENTS.md §0: a wrong picture is worse than a missing one).
+        //
+        // NativeShaderRenderer overrides this. The signature deliberately takes
+        // the Mesh rather than pre-computed matrices: the native path needs the
+        // mesh's GPU buffer cache keys and its `matrixWorld`, neither of which
+        // survives being flattened into a Matrix3D.
+        protected function _drawShaderMaterial(mesh:Mesh, material:ShaderMaterial):void
+        {
+            throw new Error("ShaderMaterial '" + AGALRenderer.labelOf(material) +
+                "' needs the native shader channel: build with --features native-shader. " +
+                "AIR/adl has no Context3DNative, and AGAL cannot express what a GLSL ES 3.00 " +
+                "shader does (texelFetch / integer ops / MRT / float render targets).");
+        }
+
+        // A material's name for a diagnostic, never the empty string: an unnamed
+        // material in an error message reads like a missing argument.
+        protected static function labelOf(material:Material):String
+        {
+            if (material == null) return '(null)';
+            return (material.name != null && material.name.length > 0) ? material.name : '(unnamed)';
+        }
+
         private function _renderMesh(mesh:Mesh):void
         {
             var geometry:BufferGeometry = mesh.geometry;
@@ -3066,6 +3112,24 @@ package asaot.three
             if (position == null) return;
 
             var material:Material = mesh.material;
+
+            // E6 (native shader.md §7.6): a ShaderMaterial is not expressible in
+            // AGAL, so it is handed to the ONE extension point instead of being
+            // approximated. Both guards are load-bearing:
+            //   * `_activePass != 0` skips the additive punctual-light passes.
+            //     They re-draw the opaque list to accumulate point/spot light; a
+            //     native program already computed its own lighting, so a second
+            //     additive pass would blend the whole surface twice.
+            //   * wireframe is not applied: a native draw's topology comes from
+            //     the program's own attribute layout, and swapping in the
+            //     expanded-quad line path would need a matching native program.
+            if (material is ShaderMaterial)
+            {
+                if (this._activePass != 0) return;
+                this._applyMaterialState(material);
+                this._drawShaderMaterial(mesh, ShaderMaterial(material));
+                return;
+            }
 
             // M26/R59: only the unlit (basic/line) programs implement
             // toneMapped = false. A lit material that asks for it would be tone

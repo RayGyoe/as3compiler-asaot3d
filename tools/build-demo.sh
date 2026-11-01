@@ -127,6 +127,30 @@ build_aot() {
     # produced from absolute paths would be a machine-specific snapshot.
     local args=(--air-app "apps/$DEMO_NAME/$MAIN-app.xml" --main-class "$MAIN"
                 --as-class-path seam --as-class-path kit)
+    # Per-demo enhancements and the classes only a STRING names (§6.7 of the E6
+    # design). Both are on the command line, not in <Main>.build.json, because
+    # --air-app REWRITES that manifest from the descriptor on every run: anything
+    # hand-written there survives only by being carried over, and `extra-roots` is
+    # not. The files are optional, one value per line, `#` comments.
+    local f r
+    if [ -f "$SELF_DIR/features" ]; then
+        local feats=""
+        while IFS= read -r f || [ -n "$f" ]; do
+            f="${f%%#*}"; f="$(printf '%s' "$f" | tr -d '[:space:]')"
+            [ -n "$f" ] || continue
+            feats="${feats:+$feats,}$f"
+        done < "$SELF_DIR/features"
+        [ -n "$feats" ] && args+=(--features "$feats") && say "features: $feats"
+    fi
+    if [ -f "$SELF_DIR/extra-roots" ]; then
+        local roots=""
+        while IFS= read -r r || [ -n "$r" ]; do
+            r="${r%%#*}"; r="$(printf '%s' "$r" | tr -d '[:space:]')"
+            [ -n "$r" ] || continue
+            roots="${roots:+$roots,}$r"
+        done < "$SELF_DIR/extra-roots"
+        [ -n "$roots" ] && args+=(--extra-roots "$roots") && say "extra roots: $roots"
+    fi
     local p
     for p in ${CLASS_PATHS[@]+"${CLASS_PATHS[@]}"}; do
         args+=(--as-class-path "$p")

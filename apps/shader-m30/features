@@ -1,0 +1,5 @@
+# Enhancements this demo needs (one per line). Comma-joins into --features.
+# The whole point of the demo is the native shader channel, which only exists
+# with this feature: without it the demo still builds and runs, prints
+# NO-CHANNEL, and proves the §8 red line instead of the channel.
+native-shader

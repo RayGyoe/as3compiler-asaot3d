@@ -48,6 +48,7 @@ package asaot.three.app
     import flash.utils.getTimer;
 
     import asaot.three.AGALRenderer;
+    import asaot.three.RendererFactory;
     import asaot.three.cameras.Camera;
     import asaot.three.cameras.PerspectiveCamera;
     import asaot.three.input.Keyboard;
@@ -225,7 +226,12 @@ package asaot.three.app
             try
             {
                 _context = stage.stage3Ds[0].context3D;
-                _renderer = new AGALRenderer(_context);
+                // E6: the backend is chosen at RUN time. A default build and
+                // `adl` take the same branch as always (the native class does not
+                // exist, so the probe misses); `--features native-shader` upgrades
+                // in place, because NativeShaderRenderer IS an AGALRenderer whose
+                // only difference is what a ShaderMaterial draws.
+                _renderer = RendererFactory.create(_context);
                 _renderer.setSize(stage.stageWidth, stage.stageHeight);
 
                 createScene();
