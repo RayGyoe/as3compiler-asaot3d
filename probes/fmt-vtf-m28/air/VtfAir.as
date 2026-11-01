@@ -36,11 +36,26 @@ package
         private var pQuad:Program3D;
         private var frames:int = 0;
 
+        // adl on macOS forwards neither trace() nor uncaught errors, so the log goes
+        // to a file. The location is chosen by measurement, not by taste:
+        //   applicationDirectory -- READ-ONLY for an AIR app; open(APPEND) throws and
+        //     the catch turns the whole probe silent (run exited 0, wrote nothing).
+        //   relative "air-out.txt" -- resolves against the adl runtime directory, same
+        //     failure mode.
+        // userDirectory ($HOME) is writable and stable under adl, so build.sh --run
+        // knows exactly where to read the result.
+        public static const LOG_NAME:String = "asaot-fmt-vtf-air.txt";
+
+        private function outFile():File
+        {
+            return File.userDirectory.resolvePath(LOG_NAME);
+        }
+
         private function say(m:String):void
         {
             log.push(m); trace(m);
             try {
-                var f:File = new File("/Users/ray.lei/Documents/as3compiler-aot/asaot3d/temp/fmt-vtf-probe/air/air-out.txt");
+                var f:File = outFile();
                 var fs:FileStream = new FileStream();
                 fs.open(f, FileMode.APPEND);
                 fs.writeUTFBytes(m + "\n");
@@ -49,7 +64,7 @@ package
         }
 
         private function flush():void {
-            var f:File = new File("/Users/ray.lei/Documents/as3compiler-aot/asaot3d/temp/fmt-vtf-probe/air/air-out.txt");
+            var f:File = outFile();
             var fs:FileStream = new FileStream();
             fs.open(f, FileMode.WRITE);
             var i:int;

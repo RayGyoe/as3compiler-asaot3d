@@ -19,6 +19,12 @@
 // to be -- a draw-time throw with no message -- and the run is RED, which is the
 // intended signal: asaot3d's GPU-skinning question (D84) is decided by this
 // capability, so it must not silently regress.
+//
+// The AIR half of the evidence is air/ (VtfAir.as + VtfAir-app.xml + build.sh):
+// three of the four facts in §36 are claims about AIR, and a claim about AIR has
+// to come from adl. Run `AIRSDK_HOME=... ./air/build.sh --run`; it compiles with
+// mxmlc and prints the probe log (which lands in ~/asaot-fmt-vtf-air.txt, because
+// adl on macOS forwards neither trace() nor uncaught errors).
 import com.adobe.utils.AGALMiniAssembler;
 import flash.display.BitmapData;
 import flash.display.Stage;

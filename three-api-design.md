@@ -3753,15 +3753,23 @@ demo 在 `updateFrame` 里每帧调一次，**第 0 档就是清晰 cube**，环
 也不靠 AIR 文档推断：写一支无窗口 Stage3D 探针，用 asaot3d 真实的调用方式在 **AOT/Metal**
 与 **AIR/adl 51.4.1** 上各跑一遍，逐项读回像素。
 
-探针：`probes/fmt-vtf-m28/{probe.as, air/VtfAir.as}`（清单带 `ASC_S3D_HALF_TEXTURES=1`）。
-复现：
+探针：`probes/fmt-vtf-m28/`——`probe.as` + `probe.build.json` 是 AOT 侧，`air/` 是 AIR 孪生。
+复现（两半都可一条命令跑完；AOT 侧结果进 `temp/`，AIR 侧见下）：
 
 ```bash
 cd asaot3d/probes/fmt-vtf-m28 && node ../../../as3compiler/src/index.ts probe.as \
   ../../seam/com/adobe/utils/AGALMiniAssembler.as --manifest probe.build.json \
   -o ../../temp/fmt-vtf-m28 --run
-cd air && adl VtfAir-app.xml      # adl 的 trace 不回显，结果写 air-out.txt
+
+AIRSDK_HOME=... ./air/build.sh --run     # mxmlc + adl，并打印探针日志
 ```
+
+AIR 侧的日志路径是实测选出来的，不是顺手写的：`adl` 在 macOS 上**既不转发 `trace()`
+也不转发未捕获异常**，所以探针必须自己落盘；而 `File.applicationDirectory` 对 AIR 应用
+是**只读**的（`open(APPEND)` 抛错，被 `catch` 吞掉 → 整支探针静默跑完、退出码 0、什么
+也没写），相对路径又会解析到 `adl` 运行时目录，症状相同。唯一实测可写且稳定的位置是
+`File.userDirectory`，故日志固定落 `~/asaot-fmt-vtf-air.txt`，`build.sh --run` 负责清理、
+读取并在缺失时报错（缺日志＝没跑到 `onCtx`，不是“没有输出”）。
 
 ### 36.1 profile：AOT 不跟随请求，AIR 跟随
 

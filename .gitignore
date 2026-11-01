@@ -10,6 +10,9 @@ node_modules/
 *.c
 *.o
 *.wasm
+# .swf 同理：apps/*/build/ 的由 build.sh 生成，probes/*/air/ 的由该探针的 build.sh
+# 生成（AIR 对照证据那一半），都不入库。探针只提交 .as + 描述符 + build.sh。
+*.swf
 
 # 构建输出目录（apps/*/build/ 里的 .swf 由 mxmlc 生成）
 build/
