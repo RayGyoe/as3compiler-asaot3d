@@ -4220,3 +4220,42 @@ Stage3D 的寄存器文件没有 stage 之分，但 SPIRV-Cross 给原生 GLSL �
 - **R83**：**整条链路只允许存在一处翻转**，且它必须挂在「跨越 render target → drawable」的
   那一步上。一旦那一步被换掉（去掉中间纹理、让上游直接写 drawable），必须重新确认翻转还在，
   并**用窗口截图而不是 dump 验证**——两侧同时颠倒时，dump 对比永远看不出问题。
+
+### 39.11 着色器回到移植版 + 每帧 72 次动态派发（D206–D208、R84–R86，2026-11-02）
+
+39.7 那一轮的调色（反射 LOD、环境光乘子、`col *= 1.45`、SSS 项、final mix、glitter 掩码）
+是在 D204/D205 两个真缺陷还没修掉的画面上做的补偿。缺陷修完后这些补偿全部失去依据，
+按「回到原作者内容」的要求整体撤回：
+
+- **D206 恢复 `water.frag` / `water.vert` 到移植版**。撤回的不只是数值，还包括为此新增的
+  uniform（`uSSS`/`uSkyView`/`uTime`/`uDebug`）：移植版用 `uSkyAmbient` 常色给水体打光，
+  不追踪 LUT，所以 `water_frag` 的注入列表也一并去掉 `atmo_core`/`atmo_sky`
+  （留着会要求两个 stage 的 `precision highp sampler2D` 一致，进而 link 失败）。
+  **`composite.frag` 是唯一保留两处非移植改动的文件**，两处都只关于「写到哪里」而非着色模型：
+  `uv = vec2(vUV.x, 1.0 - vUV.y)`（D205 的唯一翻转）与末尾的 `toSrgb()`（drawable 不是
+  `_sRGB` 视图，Metal 不会替我们做 OETF）。撤掉调色后画面即恢复原作者的金色黄昏海面。
+- **D207 CPU 100%、帧 19–27 ms 的根因：热路径用方括号取原生方法**。
+  `_native["setSamplerStateAtStage"](...)` 这种「Object 类型接收者 + 字符串名」的调用走
+  `as_dyn_call`：每次都要沿方法表按名字线性查找再调用。实测（arm64、`-O2`）
+  **单次 25 µs**；把函数值存进字段再调 **< 0.5 µs**，差 50 倍。一次 draw 要 6 次
+  （useProgram / bindTexture / 两个 uniform / drawTriangles），于是 256×256 的 FFT pass
+  单 pass 200 µs，其中 Metal 编码只占 10 µs；一帧 72 个 pass ⇒ 约 14 ms 纯派发。
+  修复：`NativeShaderRenderer` 把 12 个原生入口在构造时冻成字段，M34 把
+  `setRenderTargets` / `generateMipmaps` / `setBackBuffer` 同样冻成字段。
+  结果：单 pass 220 µs → 60 µs，`sim` 13.9 → 2.1 ms，帧 19–27 → **4.6 ms**，
+  33 → **113 fps**，慢帧计数归零。
+- **D208 高速运行时窗口截图会撕裂，看到的不是屏幕**。修好性能后同一帧的窗口截图会出现
+  「上半张是旧帧、下半张是新帧」的水平接缝，而同一帧的 PPM 完好。这是
+  `screencapture -l` 抓到合成器正在写入的 drawable 所致，不是渲染错误：
+  冻结帧（`FREEZE_AT=60`）后窗口与 PPM 逐像素一致。**判窗口内容一律先冻结**。
+
+### 39.12 本轮新增规则（R84–R86）
+
+- **R84**：**帧内热路径禁止 `obj["nativeMethod"](...)`**。原生入口必须在构造期解析成
+  字段（`private var _fnX:Function`），因为一次动态调用约 25 µs，和 pass 的有效工作量同量级。
+  新增原生调用点时，先问「这一帧会走几次」。
+- **R85**：**调试着色器的调色不得留成“看起来对”的状态**。凡是用于补偿某个已知缺陷的
+  shader 改动，缺陷修复后必须整体撤回，并重新对照移植版；保留项要能在注释里指出它
+  对应哪条上屏事实（翻转、编码、精度），否则就是待撤的临时补丁。
+- **R86**：**窗口截图只在冻结帧时可信**（承 R83）。运行中的截图即使内容明显错误，
+  也不能据此判定上屏链路坏；先用 `FREEZE_AT` 复现，再决定是否查 pass。

@@ -109,12 +109,6 @@ package
         private static const SPRAY_COUNT:int = 2600;
         private static const CHECK_ENABLED:Boolean = true;
 
-        // Visual diagnosis switch: 0 = shaded, 1..8 = one water term per build (see the
-        // tail of assets/ocean/water.frag). Kept as a constant so a probe run is exactly
-        // reproducible; nothing in a shipped frame reads it.
-        private static const DEBUG:int = 0;
-        private var _chan:int = DEBUG;
-
         // Write the composed frame to temp/m34-frame.ppm once the checks are in. A
         // window capture reads the window server's last snapshot, which goes stale for
         // this demo (the Metal layer presents without an AppKit redraw), so the only
@@ -179,6 +173,12 @@ package
         // State
         // ------------------------------------------------------------------
         private var _native:Object;
+        // Hot-path native entry points, resolved once (see NativeShaderRenderer for the
+        // measurement: a bracket call costs ~25 us in this runtime, a field call ~0.5 us,
+        // and this demo issues 10 bind-target + 7 mipmap calls every frame).
+        private var _fnSetTargets:Function;
+        private var _fnMips:Function;
+        private var _fnBackBuffer:Function;
         private var _nr:NativeShaderRenderer;
         private var _noChannel:Boolean = false;
 
@@ -279,6 +279,9 @@ package
             }
             _nr = NativeShaderRenderer(_renderer);
             _native = _nr.context3DNative;
+            _fnSetTargets = _native["setRenderTargets"];
+            _fnMips = _native["generateMipmaps"];
+            _fnBackBuffer = _native["setBackBuffer"];
 
             this.makeTargets();
             this.makeMaterials();
@@ -295,7 +298,7 @@ package
 
             this.bakeAtmosphere();
             this.bakeSpectra();
-            _native["setBackBuffer"]();
+            _fnBackBuffer();
 
             logLine("ocean-m34: 4 cascades (" + P0 + "/" + P1 + "/" + P2 + "/" + P3 + " m) x " +
                 N + " FFT, " + RW + "x" + RH + " internal; atmosphere + caustics + spray + " +
@@ -388,7 +391,10 @@ package
             _mTerrain.side = Material.DoubleSide;
             _mTerrain.samplers = { uCaustics: "repeat", uCausticsDeep: "repeat" };
 
-            _mWater = this.mat(OceanM34Assets.program("water_frag", ["atmo_core", "atmo_sky"]),
+            // No atmospheric includes: the port this file came from lights the body with
+            // a flat uSkyAmbient instead of tracing the LUT, and pulling atmo_core in
+            // would also force `precision highp sampler2D` to match between stages.
+            _mWater = this.mat(OceanM34Assets.program("water_frag", null),
                                OceanM34Assets.program("water_vert", null));
             // Every cascade atlas tiles, so its sampler must repeat; uOpaque and
             // uReflection are screen-sized and clamp. Both stages declare the cascades
@@ -439,7 +445,7 @@ package
             _mSkyLut.setUniformValue("uSunMu", _sunY);
             _mSkyLut.setUniformValue("uSunIllum", SUN_ILLUM);
             this.pass(_mSkyLut, [_skyLut], null);
-            _native["generateMipmaps"](_skyLut);
+            _fnMips(_skyLut);
 
             _mSky.setUniformValue("uSunDir", [_sunX, _sunY, _sunZ]);
             _mSky.setUniformValue("uSunColor", SUNCOL);
@@ -544,9 +550,6 @@ package
                         sub = sub * 2;
                     }
                 }
-
-                // 16 butterflies flip A<->B an even number of times, so the result is
-                // back in A -- stated rather than relied on by luck.
                 var cur:Object = _disp[c][_cur];
                 var prev:Object = _disp[c][1 - _cur];
                 _mAssemble.setUniformValue("uIn0", src[0]);
@@ -557,8 +560,8 @@ package
 
                 // the water vertex program derives its roughness from the slope chain's
                 // coarsest mip, so the chain has to exist before the surface reads it
-                _native["generateMipmaps"](cur);
-                _native["generateMipmaps"](_slope[c]);
+                _fnMips(cur);
+                _fnMips(_slope[c]);
             }
             _cur = 1 - _cur;   // next frame's "previous" is this frame's output
         }
@@ -576,7 +579,7 @@ package
             _mCaustic.setUniformValue("uLod", 1.0);          // 256 slope texels / 128 cells
             _mCaustic.setUniformValue("uMargin", 0.35);
 
-            _native["setRenderTargets"]([_causticNear], null);
+            _fnSetTargets([_causticNear], null);
             _context.clear(0, 0, 0, 1, 1, 0, 7);
             _mCaustic.setUniformValue("uRes", CAUSTIC_NEAR);
             _mCaustic.setUniformValue("uDepth", 1.5);
@@ -586,9 +589,9 @@ package
             _nr.drawNative(_causticMesh, _mCaustic);
             _context.setBlendFactors("one", "zero");
             _context.setCulling("back");
-            _native["generateMipmaps"](_causticNear);
+            _fnMips(_causticNear);
 
-            _native["setRenderTargets"]([_causticDeep], null);
+            _fnSetTargets([_causticDeep], null);
             _context.clear(0, 0, 0, 1, 1, 0, 7);
             _mCaustic.setUniformValue("uRes", CAUSTIC_DEEP);
             _context.setBlendFactors("one", "one");
@@ -601,7 +604,7 @@ package
             _nr.drawNative(_causticMesh, _mCaustic);
             _context.setBlendFactors("one", "zero");
             _context.setCulling("back");
-            _native["generateMipmaps"](_causticDeep);
+            _fnMips(_causticDeep);
         }
 
         // ------------------------------------------------------------------
@@ -681,7 +684,7 @@ package
             _mirror.projectionMatrix.copy(_camera.projectionMatrix);
             _mirror.projectionMatrixInverse.copy(_camera.projectionMatrixInverse);
 
-            _native["setRenderTargets"]([_refl], _reflDepth);
+            _fnSetTargets([_refl], _reflDepth);
             // Premultiplied, alpha = coverage: the water samples this blurred, and a mip
             // of black would drag the reflection to black instead of to the sky.
             _context.clear(0, 0, 0, 0, 1, 0, 7);
@@ -690,7 +693,7 @@ package
             _nr.render(_reflScene, _mirror);
             _mSky.setUniformValue("uAlpha", 1e4);
             _mTerrain.setUniformValue("uReflPass", 0.0);
-            _native["generateMipmaps"](_refl);
+            _fnMips(_refl);
 
         }
 
@@ -698,7 +701,7 @@ package
         // composite passes read it as "what is behind me".
         private function drawOpaque():void
         {
-            _native["setRenderTargets"]([_opaque], _opaqueDepth);
+            _fnSetTargets([_opaque], _opaqueDepth);
             _context.clear(0, 0, 0, 0, 1, 0, 7);
             // The sky's per-pixel world ray comes from the camera basis, not from an
             // inverted view-projection: `inverse(mat4)` in the native path produced NaN
@@ -735,26 +738,24 @@ package
             // road), and 1/18000 is its aerial-perspective density.
             m.setUniformValue("uOptics", [0.02, 0.06, 0.04, 1.0 / 18000.0]);
             m.setUniformValue("uFoam", [0.05, 1.3, 0.35, 0.85]);
-            m.setUniformValue("uSSS", [1.6, 0.06, 0.05, 0.0]);
-            m.setUniformValue("uSkyView", _skyLut);
-            m.setUniformValue("uTime", _time);
-                    m.setUniformValue("uSunDir", [_sunX, _sunY, _sunZ]);
+            m.setUniformValue("uSunDir", [_sunX, _sunY, _sunZ]);
             m.setUniformValue("uSunColor", SUNCOL);
             m.setUniformValue("uAbsorption", ABSORB);
             m.setUniformValue("uScatterColor", SCATTER);
-            m.setUniformValue("uSkyView", _skyLut);
+            // The original port lights the body with one flat sky colour; the LUT-driven
+            // version that replaced it is not in this file any more (see the header of
+            // assets/ocean/water.frag), so the uniform stays a constant.
             m.setUniformValue("uSkyAmbient", [0.32, 0.42, 0.52]);
             m.setUniformValue("uGlint", 0.6);
-                var f:Vector.<Number> = _camera.matrixWorld.elements;
+            var f:Vector.<Number> = _camera.matrixWorld.elements;
             m.setUniformValue("uCamForward", [-f[8], -f[9], -f[10]]);
-            m.setUniformValue("uDebug", _chan);
             m.setUniformValue("uCellStep", 6.283185307179586 / 320.0);
             m.setUniformValue("uWind", WIND_SPEED);
 
             // clear alpha 1 = "no water here": the tag the composite keys on. 0 is the
             // underside and 2 the top, so a cleared pixel cannot be read as a surface.
             if (!_dbgWaterDescribed) { _dbgWaterDescribed = true; logLine("WATER PROGRAM:\n" + _nr.describeProgram(m)); }
-            _native["setRenderTargets"]([_water], null);
+            _fnSetTargets([_water], null);
             _context.clear(0, 0, 0, 1, 1, 0, 7);
             _context.setCulling("frontAndBack");   // gl_FrontFacing must be able to differ
             _nr.drawNative(_waterMesh, m);
@@ -773,7 +774,7 @@ package
             m.setUniformValue("uTime", _time);
             m.setUniformValue("uSprayColor", [0.85, 0.92, 1.0]);
 
-            _native["setRenderTargets"]([_spray], null);
+            _fnSetTargets([_spray], null);
             _context.clear(0, 0, 0, 0, 1, 0, 7);
             _context.setBlendFactors("one", "one");
             _context.setCulling("frontAndBack");
@@ -831,14 +832,13 @@ package
             m.setUniformValue("uSunColor", SUNCOL);
             m.setUniformValue("uUnder", [0.055, 0.9, 42.0, 0.0]);
             m.setUniformValue("uExposure", 0.45);
-            m.setUniformValue("uDebug", _chan);
 
             if (!_dbgDescribed) { _dbgDescribed = true; logLine("COMPOSITE PROGRAM:\n" + _nr.describeProgram(m)); }
             // One composite, straight into the back buffer. An intermediate _final
             // texture plus a copy sampled by the window compositor disagreed with
             // the same texture read back with drawToBitmapData: the window showed
             // the opaque pass while the readback showed the graded frame.
-            _native["setBackBuffer"]();
+            _fnBackBuffer();
             _context.clear(0, 0, 0, 1);
             _context.setCulling("frontAndBack");
             _nr.drawNative(_quad, m);
@@ -866,7 +866,7 @@ package
             if (src != null)
             {
                 _mPresent.setUniformValue("uSrc", src);
-                _native["setBackBuffer"]();
+                _fnBackBuffer();
                 _context.clear(0, 0, 0, 1);
                 _context.setCulling("frontAndBack");
                 _nr.drawNative(_quad, _mPresent);
@@ -914,7 +914,7 @@ package
         // Every offscreen draw goes through here: bind the target(s), draw the quad.
         private function pass(material:ShaderMaterial, colors:Array, depth:Object):void
         {
-            if (colors != null) _native["setRenderTargets"](colors, depth);
+            if (colors != null) _fnSetTargets(colors, depth);
             _context.setCulling("frontAndBack");
             _nr.drawNative(_quad, material);
         }
@@ -1012,7 +1012,7 @@ package
             _mProbe.setUniformValue("uGain", gain);
             _mProbe.setUniformValue("uBias", bias);
 
-            _native["setBackBuffer"]();
+            _fnBackBuffer();
             _context.clear(0, 0, 0, 0);
             _context.setCulling("frontAndBack");
             _nr.drawNative(_quad, _mProbe);

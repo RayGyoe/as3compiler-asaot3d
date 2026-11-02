@@ -1173,7 +1173,7 @@ package asaot.three
                         : (taps == 5 ? this._bgCubeProgramHdrBlur : this._bgCubeProgramHdrBlur9);
             }
             else program = decode ? this._bgCubeProgramDecode : this._bgCubeProgramPlain;
-            this._context.setProgram(program);
+            this._bindProgram(program);
 
             // Rotation-only view: three.js copies the camera POSITION into the
             // box each frame (boxMesh.onBeforeRender -> matrixWorld.copyPosition)
@@ -1223,7 +1223,7 @@ package asaot.three
             this._ensureBackgroundGeometry();
 
             var decode:Boolean = AGALRenderer.needsDecode(texture);
-            this._context.setProgram(decode ? this._bgPlaneProgramDecode : this._bgPlaneProgramPlain);
+            this._bindProgram(decode ? this._bgPlaneProgramDecode : this._bgPlaneProgramPlain);
 
             // vc0 = (1,1,1,1): the quad's z/w are constant 1 (three.js
             // background.vertex.glsl.js: `gl_Position = vec4(position.xy, 1, 1)`).
@@ -2001,7 +2001,7 @@ package asaot.three
             {
                 this._shadowPassActive = which;
                 var shadowProg:Program3D = (which == 1) ? this._shadowAlphaProgram : this._shadowProgram;
-                this._context.setProgram(shadowProg);
+                this._bindProgram(shadowProg);
                 this._curStreamMask = this._streamsOf(shadowProg);
                 this._curSamplerMask = this._samplersOf(shadowProg);
                 // fc1 = (255, 1/255, 0, 1): the depth-packing scales (M13) and
@@ -2408,7 +2408,7 @@ package asaot.three
             // one side of a silhouette and back-facing on the other.
             this._applyMaterialState(lines.material);
 
-            this._context.setProgram(this._getLineProgram(vertexColors, toneMapped));
+            this._bindProgram(this._getLineProgram(vertexColors, toneMapped));
             this._context.setProgramConstantsFromMatrix(Context3DProgramType.VERTEX, 0, this._matrix3D, true);
 
             // vc4 = (halfWidth, halfHeight, halfLineWidth, 0) in device pixels.
@@ -2895,7 +2895,7 @@ package asaot.three
             this._mvp.multiplyMatrices(this._viewProjection, mesh.matrixWorld);
             this._matrix3D.rawData = this._mvp.elements;
 
-            this._context.setProgram(this._lineProgram);
+            this._bindProgram(this._lineProgram);
             this._context.setProgramConstantsFromMatrix(Context3DProgramType.VERTEX, 0, this._matrix3D, true);
 
             // vc4 = (halfWidth, halfHeight, halfLineWidth, -1) in device pixels
@@ -3087,6 +3087,28 @@ package asaot.three
         // the Mesh rather than pre-computed matrices: the native path needs the
         // mesh's GPU buffer cache keys and its `matrixWorld`, neither of which
         // survives being flattened into a Matrix3D.
+        // Bind an AGAL program AND invalidate the native backend's sampler-state cache.
+        //
+        // WHY THE BASE CLASS KNOWS ABOUT A NATIVE CACHE. Stage3D keeps ONE sampler state
+        // per (stage, unit), and Context3D.setProgram re-applies the program's own `tex`
+        // flags to it. The native backend caches "what is installed at this slot" so it
+        // can skip re-sending an unchanged state on every draw (a 72-pass FFT frame sent
+        // ~150 redundant setSamplerStateAtStage calls, each a string-carrying dynamic
+        // call, worth ~13 ms/frame). An AGAL program bind is precisely the event that
+        // makes that cache wrong. Keeping the hook here -- rather than in each caller --
+        // means a future setProgram site cannot forget it.
+        protected function _bindProgram(p:*):void
+        {
+            this._context.setProgram(p);
+            this.invalidateSamplerCache();
+        }
+
+        // No-op in the AGAL-only path: there is no cache to invalidate. Overridden by
+        // NativeShaderRenderer, which owns one.
+        protected function invalidateSamplerCache():void
+        {
+        }
+
         protected function _drawShaderMaterial(mesh:Mesh, material:ShaderMaterial):void
         {
             throw new Error("ShaderMaterial '" + AGALRenderer.labelOf(material) +
@@ -3321,7 +3343,7 @@ package asaot.three
 
             var basicProgram:Program3D = this._getBasicProgram(map != null, decode, fogOn,
                                                               material.toneMapped);
-            this._context.setProgram(basicProgram);
+            this._bindProgram(basicProgram);
             this._curStreamMask = this._streamsOf(basicProgram);
             this._curSamplerMask = this._samplersOf(basicProgram);
 
@@ -3483,7 +3505,7 @@ package asaot.three
                                                      this._shadowLightCount, decode, flat, fogOn,
                                                      prefilteredDraw);
             }
-            this._context.setProgram(stdProgram);
+            this._bindProgram(stdProgram);
             this._curStreamMask = this._streamsOf(stdProgram);
             this._curSamplerMask = this._samplersOf(stdProgram);
 
