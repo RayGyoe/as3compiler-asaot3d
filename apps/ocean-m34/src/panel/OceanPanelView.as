@@ -165,16 +165,26 @@ package panel
                     self.setOpen(false, "scale");
                     cb(Dirty.ALL);
                 } }));
+            // MSAA and render scale are two different levers and the panel shows both:
+            // the level multisamples the scene TARGETS (edge quality, no extra shading
+            // work), while render scale above 1 supersamples everything including
+            // shading. They compose, so a 2x level at 1x scale and a 4x level at 2x
+            // scale are both reachable.
+            body.push(select({ key: "msaa",
+                value: OceanParams.msaaLabels()[OceanParams.msaaIndex(p.msaa)],
+                options: OceanParams.msaaLabels(), width: inner,
+                open: this._openKey == "msaa",
+                onOpenChange: function (o:Boolean):void { self.setOpen(o, "msaa"); },
+                onSelect: function (i:int):void
+                {
+                    p.msaa = OceanParams.MSAA_LEVELS[i];
+                    self.setOpen(false, "msaa");
+                    cb(Dirty.ALL);
+                } }));
             body.push(checkbox({ key: "reflections", label: "Planar reflections",
                 checked: p.reflections,
                 onChange: function (v:Boolean):void { p.reflections = v; cb(Dirty.ALL); } }));
-            // The web GUI's `msaa` row cannot exist here: the native channel's render
-            // targets are single-sample (multisampling lives on the drawable, and this
-            // demo never draws geometry into it). Render scale above 1 resolves the
-            // bigger internal target with a four-tap box in grade.frag -- real
-            // antialiasing, done at the resize -- and the note says which is which
-            // instead of pretending a 2x/4x/8x menu exists.
-            body.push(text("MSAA: n/a (offscreen chain) \u00b7 scale > 1 supersamples",
+            body.push(text("scene targets only \u00b7 full-screen data passes stay 1 sample",
                 { text: { fontSize: 10, color: 0x6E7A90 } }));
 
             return column({ alignItems: "flex-end", size: [Length.pct(1), Length.pct(1)] }, [

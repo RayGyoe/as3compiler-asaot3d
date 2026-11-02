@@ -505,6 +505,11 @@ M10 之前 `transparent`/`opacity`/`alphaTest` 只有 API 形状、`toneMapping`
 而 MSAA 的分配发生在 `s3d_create`（C 侧），JS/AS3 层没有插话点。要在运行时可控需要给
 `Context3D` 加一个非 AIR 的静态开关——那是增强项的形状，M10 不做。
 
+> **后续（M34，2026-11-03）**：RTT 侧的「运行时可控」后来真的做了，但形状不是给 `Context3D`
+> 加开关，而是逐目标的 `Context3DNative.setRenderTargetSamples(tex, n)`（§39.17 的 D220）。屏上路径仍走
+> `ASC_S3D_MSAA`，两者互不影响：屏上那个是一次性的上下文级配置，离屏这个是应用按 target 决定的
+> 同一次绘制能多次切换的状态。
+
 **验证方式**：`temp/msaa_shot.sh` 同场景跑 `ASC_S3D_MSAA` 未设 vs `=4`，差 3390/259200 像素、
 最大通道差 581，差异集中在球体剪影边缘（`temp/msaa_diffmask.png` 与 `temp/msaa_edge_ab.png`）。
 边缘有差、内部无差，正是 MSAA 该有的样子；差异若落在面上说明采样数没生效而是别的状态被改了。
@@ -4410,9 +4415,21 @@ OceanPanelView ──► OceanParams ──► applyView()/applyParams() ──�
   空目标，于是 `FAIL four-cascade FFT gives a varying surface` / `FAIL atmosphere LUT bake
   produced radiance` / `FAIL the surface pass covered the lower frame` 三条同时红。
   2× 档实测 `2304x1440 internal (drawable 960x600)`，`grade.frag` 的 `uSuper` 打开后做
-  四抽样箱式滤波——这就是美术上等价于 MSAA 的**超采样**（真正的 MSAA 在当前离屏链里没有
-  插入点：Metal 的 MSAA 目标要在 pipeline 的可写附件上，而我们是「一张张单独 pass 的
-  半浮点目标」）。
+  四抽样箱式滤波。注意质量档与 MSAA **是两把不同的旋钮**（见 D220）：档位是超采样，
+  每个像素都重新着色；MSAA 只均摊子像素覆盖，解决边缘而不动内部。两者可叠加。
+- **D220 离屏 MSAA 是逐目标 companion，不是全局开关**。`Context3DNative.setRenderTargetSamples
+  (tex, n)` 给被点名的目标挂一张同尺寸 multisample companion，绘制写 companion，**读取时惰性
+  resolve** 回目标本体（`s3d_msaa_resolve_texture` 在采样绑定 / 原生纹理绑定 /
+  `s3d_get_render_target` / `s3d_generate_mips` / 帧 flush 五处入口都先 resolve）。三条硬约束：
+  ① Metal 要求**同一次 pass 的所有附件采样数一致**，所以颜色与深度要一起挂，否则
+  `s3d_pass_samples()` 发现不齐就退回 1 采样（不报错、不退性能）；② 只给**几何光栅化进去的**
+  目标挂（不透明/水面/spray/反射 + 两张深度），FFT 图集、测光网格、1×1 曝光状态、bloom 金字塔
+  全屏 quad 覆盖，多采样是 bit-identical 的浪费；③ `ASC_S3D_MSAA` 只管 drawable（D55），
+  两者不相干。风验：冻结时间、Golden hour 视图，off vs 4x 差 **1.58%** 像素
+  （9118/576000，均值 0.185），其中 **92.5%** 落在强边缘；Breakers 视图 1.12%，硬台阶
+  像素 10861 → 10668。若差异落在大块平面上，说明不是 MSAA 而是别的状态被动了。
+  实现代价：`S3DRttMsaa` 槽表 32 项、`s3d_destroy_texture` 一并回收 companion；AST 侧
+  `Context3DNative.setRenderTargetSamples` 返回 Boolean（false = 设备拒绕，应用自己 logLine）。
 - **D218 浊度属于光柱 march，不属于合成**。`uUnder` 原本在 `drawShafts()` 里写死成
   `[0.055, 0.9, 42.0, 0]`，所以「浊度」这个模型字段在画面上是死的；改成
   `[_params.scattering, _params.shafts, _params.shaftRange, 0]` 之后，浊度 0.055 → 0.35
@@ -4431,7 +4448,7 @@ OceanPanelView ──► OceanParams ──► applyView()/applyParams() ──�
 - **岸线波浪**（参照 `water/shoreMap.js`：岸距 SDF、行进时间图、浅水增陡 shoaling、岸边泡沫）。
   这是本轮唯一还缺的功能段，需要一张烘焙的岸距图和一个新的水面分支，规模与 D215 同级。
 
-### 39.18 本轮新增规则（R90–R92）
+### 39.18 本轮新增规则（R90–R93）
 
 - **R90**：**后期先问「这个值编码过没有」**。exposure/bloom/tone map 必须在**线性 HDR**
   上做，写进 drawable 的那一步才做 OETF；把 exposure 放在 sRGB 编码之后等于白调（暗部已经
@@ -4447,4 +4464,10 @@ OceanPanelView ──► OceanParams ──► applyView()/applyParams() ──�
   能被单独重建，且重建入口只碰这一组；把 FFT 级联/LUT 混在一起重建，等于每次改分辨率都把
   累积状态清空（本轮实测三条自检立刻红）。同理，凡是**由分辨率推导**的量（相机 aspect、
   texel size、超采样开关）都要从 `_rw/_rh` 读，不能从 `stage.stageWidth` 读。
+- **R93**：**挂 MSAA 要连深度一起挂，且重建目标集后必须重挂**。`s3d_pass_samples()` 只在
+  **本次 pass 的所有附件采样数完全相同**时才用多采样，少挂一个深度附件就静默退回 1 采样——
+  画面看着「差不多对」，只有边缘锯齿在。目标重建（渲染缩放）会把 companion 一并丢掉，所以
+  应用要在重建后重新 push 一次采样数；`OceanM34` 用一个 `_appliedMsaa` 哨兵（重建时置 0）
+  把「已经推过」与「这个目标还没推过」区分开。判据：改档位前后截图差应集中在 1~2 px 宽的
+  边缘带上；若差在整块面上，说明 PSO 采样数与本帧附件不匹配。
 

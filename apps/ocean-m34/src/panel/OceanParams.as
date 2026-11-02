@@ -21,11 +21,10 @@
 // WHAT IS NOT HERE, and why (all reported in the log at startup):
 //   * scatter colour as a colour picker -- asaotui has no colour widget yet, so the
 //     presets are the only way to move it.
-//   * MSAA -- the native channel's render targets have ONE sample: multisampling
-//     exists only on the drawable, and this demo never draws geometry there (the
-//     whole frame is offscreen and composited). `renderScale` above 1 is the honest
-//     substitute and is what the QUALITY section offers: supersampling, resolved by
-//     the four-tap box in grade.frag.
+//   * MSAA is a SELECT over real sample counts (see `msaa` below): the channel grows
+//     a per-target multisample companion in Context3DNative.setRenderTargetSamples,
+//     so the scene targets are genuinely multisampled. `renderScale` above 1 is the
+//     orthogonal supersampling knob, resolved by the four-tap box in grade.frag.
 //   * lens droplets and the meniscus band -- neither is in the ported pass list yet,
 //     so a slider would be a picture of a control.
 //
@@ -99,9 +98,17 @@ package panel
 
         // ---- quality -----------------------------------------------------
         // Multiplies the internal render size (RW x RH). Above 1 the HDR target is
-        // larger than the window and grade.frag resolves it with a four-tap box, which
-        // is this chain's antialiasing (see the header note about MSAA).
+        // larger than the window and grade.frag resolves it with a four-tap box.
         public var renderScale:Number = 1.0;
+
+        // Multisample level of the SCENE targets (opaque/water/spray/reflection and
+        // their depth). 1 = off, which is also the AIR-parity default: Stage3D has no
+        // such knob, so turning it on is this port's own enhancement and must be asked
+        // for. Multisampling averages subpixel COVERAGE, so it fixes edges (island
+        // silhouettes, the water line, spray particles) and leaves the interior of a
+        // surface untouched -- which is why the full-screen GPU-data passes keep one
+        // sample: they have no edge to improve.
+        public var msaa:int = 1;
 
         public var reflections:Boolean = true;
 
@@ -172,6 +179,31 @@ package panel
             ["shaftRange", "Shaft range", 5, 120, 0],
             ["underwaterExposure", "Underwater exp", 0.2, 2, 2]
         ];
+
+        // MSAA is a SELECT for the same reason render scale is: three honest levels,
+        // each one a real sample count on the scene targets. 8x is accepted by the
+        // channel but not offered here -- at 2x render scale the scene targets alone
+        // would be ~250 MB of multisample memory for a difference no frame shows.
+        public static const MSAA_LEVELS:Array = [1, 2, 4];
+
+        public static function msaaLabels():Array
+        {
+            return ["off", "2x", "4x"];
+        }
+
+        // Index of the level nearest `v` (values snap, they never land between two
+        // entries), so a restored state still highlights a row.
+        public static function msaaIndex(v:Number):int
+        {
+            var best:int = 0;
+            var bd:Number = Math.abs(MSAA_LEVELS[0] - v);
+            for (var i:int = 1; i < MSAA_LEVELS.length; i++)
+            {
+                var d:Number = Math.abs(MSAA_LEVELS[i] - v);
+                if (d < bd) { bd = d; best = i; }
+            }
+            return best;
+        }
 
         // Render scale is a SELECT, not a slider: every value rebuilds every
         // size-dependent render target, and the native channel has no texture dispose,
@@ -303,6 +335,7 @@ package panel
             if (name == "shaftRange") return this.shaftRange;
             if (name == "underwaterExposure") return this.underwaterExposure;
             if (name == "renderScale") return this.renderScale;
+            if (name == "msaa") return this.msaa;
             throw new Error("OceanParams.valueOf: unknown control '" + name + "'");
         }
 
@@ -340,6 +373,7 @@ package panel
             if (name == "shaftRange") { this.shaftRange = Math.max(1.0, v); return; }
             if (name == "underwaterExposure") { this.underwaterExposure = Math.max(0.01, v); return; }
             if (name == "renderScale") { this.renderScale = Math.min(2.0, Math.max(0.5, v)); return; }
+            if (name == "msaa") { this.msaa = MSAA_LEVELS[msaaIndex(v)]; return; }
             throw new Error("OceanParams.setValue: unknown control '" + name + "'");
         }
 
@@ -419,6 +453,7 @@ package panel
             this.shaftRange = d.shaftRange;
             this.underwaterExposure = d.underwaterExposure;
             this.renderScale = d.renderScale;
+            this.msaa = d.msaa;
             this.reflections = d.reflections;
             this.view = d.view;
             this.absorbBase[0] = d.absorbBase[0];
@@ -451,7 +486,7 @@ package panel
                 " contrast=" + r2(this.contrast) + " saturation=" + r2(this.saturation) +
                 " vignette=" + r2(this.vignette) +
                 " | turbidity=" + r3(this.scattering) + " shafts=" + r2(this.shafts) +
-                " scale=" + r2(this.renderScale) +
+                " scale=" + r2(this.renderScale) + " msaa=" + this.msaa +
                 " reflections=" + this.reflections +
                 " view=" + VIEWS[this.view];
         }

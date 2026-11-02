@@ -224,6 +224,39 @@ check("H4 scaleIndex snaps to the NEAREST step",
 check("H5 renderScale round-trips through the model",
     near(p.valueOf("renderScale"), p.renderScale));
 
+// MSAA is a second, orthogonal select: the render scale supersamples every pixel,
+// the sample count only averages subpixel coverage on the scene targets. Both are
+// real sample counts on the channel side (Context3DNative.setRenderTargetSamples),
+// so the model has to carry an int, not a 0..1 slider position.
+check("H6 the sample menu is off/2x/4x",
+    OceanParams.MSAA_LEVELS.length == 3 && OceanParams.MSAA_LEVELS[0] == 1 &&
+    OceanParams.MSAA_LEVELS[1] == 2 && OceanParams.MSAA_LEVELS[2] == 4);
+check("H7 the sample labels name the level",
+    OceanParams.msaaLabels()[0] == "off" && OceanParams.msaaLabels()[1] == "2x" &&
+    OceanParams.msaaLabels()[2] == "4x");
+check("H8 msaaIndex finds the exact level",
+    OceanParams.msaaIndex(1) == 0 && OceanParams.msaaIndex(2) == 1 &&
+    OceanParams.msaaIndex(4) == 2);
+// 8x is accepted by the channel but not offered here, and a level between two rows
+// must still highlight one of them rather than an empty trigger.
+check("H9 msaaIndex snaps an unlisted level to the nearest row",
+    OceanParams.msaaIndex(8) == 2 && OceanParams.msaaIndex(3) == 1 &&
+    OceanParams.msaaIndex(0) == 0);
+check("H10 the sample level starts off (AIR parity: Stage3D has no such knob)",
+    p.msaa == 1);
+check("H11 msaa round-trips through the model", p.valueOf("msaa") == p.msaa);
+p.setValue("msaa", 4);
+check("H12 setValue snaps to a menu level", p.msaa == 4);
+p.setValue("msaa", 8);
+check("H13 an unlisted level snaps down to 4x", p.msaa == 4);
+p.setValue("msaa", 1);
+check("H14 the level can be turned back off", p.msaa == 1);
+p.setValue("msaa", 4);
+p.setValue("renderScale", 2.0);
+p.reset();
+check("H15 reset() restores the off default", p.msaa == 1);
+check("H16 reset() restores the 1x render scale", p.renderScale == 1.0);
+
 // ---------------------------------------------------------------------------
 // F. describe()
 // ---------------------------------------------------------------------------

@@ -219,6 +219,7 @@ package
         private var _fnSetTargets:Function;
         private var _fnMips:Function;
         private var _fnBackBuffer:Function;
+        private var _fnSetSamples:Function;
         private var _nr:NativeShaderRenderer;
         private var _noChannel:Boolean = false;
 
@@ -254,6 +255,10 @@ package
         private var _rw:int = RW;
         private var _rh:int = RH;
         private var _scaleApplied:Number = 1.0;
+        // Last multisample level pushed to the scene targets. 0 = "not yet applied", so a
+        // rebuilt target set (render scale) re-acquires its level instead of keeping the
+        // fresh textures single-sample.
+        private var _appliedMsaa:int = 0;
         private var _opaque:Object;
         private var _opaqueDepth:Object;
         private var _water:Object;
@@ -397,6 +402,7 @@ package
             _fnSetTargets = _native["setRenderTargets"];
             _fnMips = _native["generateMipmaps"];
             _fnBackBuffer = _native["setBackBuffer"];
+            _fnSetSamples = _native["setRenderTargetSamples"];
 
             this.makeTargets();
             this.makeMaterials();
@@ -520,6 +526,9 @@ package
         private function makeScreenTargets():void
         {
             _bloom = []; _bloomW = []; _bloomH = [];
+            // Fresh textures carry no multisample companion, so the level is re-applied
+            // on the next frame (applyMsaa sees a different value and pushes it).
+            _appliedMsaa = 0;
 
             // mipmapped: the water samples this at a roughness-driven LOD, and a LOD past
             // the last level of an unmipmapped target is black, not blurred.
@@ -961,6 +970,7 @@ package
 
             this.markParamsApplied();
             this.applyRenderScale();
+            this.applyMsaa();
             if (sunDirty) this.bakeAtmosphere();
             if (seaMoved) this.bakeSpectra();
         }
@@ -975,6 +985,36 @@ package
         // Below 1.0 the frame is rendered smaller than the window and the grade pass
         // magnifies it: a real speed knob at the cost of sharpness. Above 1.0 the grade
         // pass runs its four-tap box (`uSuper`) and that is this chain's antialiasing.
+        // QUALITY -> multisample level of the SCENE targets. Unlike the render scale this
+        // needs no rebuild: the level is a companion surface swapped in place
+        // (Context3DNative.setRenderTargetSamples), so a switch costs one allocation and
+        // keeps every bake, the FFT state and the colour path untouched.
+        //
+        // WHICH targets: the ones geometry rasterises into -- opaque (sky/terrain/
+        // islands), water, spray and the planar reflection -- plus their two depth
+        // buffers, because Metal requires ONE sample count per pass. NOT the data
+        // targets: the FFT atlases, the metering grid, the 1x1 exposure state and the
+        // bloom pyramid are written by full-screen quads, which cover every sample
+        // identically; multisampling there would cost memory and a resolve per pass for
+        // a bit-identical result (see docs/zh-cn/native-shader.md §9).
+        private function applyMsaa():void
+        {
+            var n:int = _params.msaa;
+            if (n == _appliedMsaa) return;
+            _appliedMsaa = n;
+
+            var tex:Array = [_opaque, _water, _spray, _refl, _opaqueDepth, _reflDepth];
+            var nm:Array = ["opaque", "water", "spray", "reflection", "opaqueDepth", "reflDepth"];
+            var bad:String = "";
+            for (var i:int = 0; i < tex.length; i++)
+            {
+                if (tex[i] == null) continue;
+                if (_fnSetSamples(tex[i], n) == false && bad == "") bad = nm[i];
+            }
+            logLine("ocean-m34 msaa " + (n > 1 ? n + "x" : "off") +
+                    (bad == "" ? "" : " -- the device refused " + bad + " (see stderr); it stays single-sample"));
+        }
+
         private function applyRenderScale():void
         {
             var s:Number = _params.renderScale;
