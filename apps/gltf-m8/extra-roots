@@ -1,0 +1,3 @@
+# 只被 getDefinitionByName 字符串命名，--air-app 闭包看不见它；没有这一行，
+# features 会给出「有通道、没有渲染器」的半增强构建（RendererFactory 报 native renderer=false）。
+asaot.three.NativeShaderRenderer

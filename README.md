@@ -168,6 +168,37 @@ three.js 是 **MIT**，借鉴/移植只需保留版权声明。
 配套：`tools/build-demo.sh` 在**每个后端产物旁边**建一个 `assets` 符号链接（AOT 建在可执行文件旁，
 AIR 建在 SWF 旁），于是路径彻底与 cwd 无关。新增 demo 时照抄这套即可，不要再写裸相对路径。
 
+#### 2.2 全部 demo 统一按增强模式构建（2026-11-02 起）
+
+每个 `apps/<demo>/` 都有**两个**清单文件，二者缺一不可，否则拿到的是半增强构建：
+
+| 文件 | 作用 | 缺了会怎样 |
+|---|---|---|
+| `features` = `native-shader` | 定义 `ASC_USE_NATIVE_SHADER=1`，注册 `Context3DNative`/`NativeProgram3D`，并链接 glslang + SPIRV-Cross | 默认构建：类根本不存在，`ShaderMaterial` 拒绝绘制 |
+| `extra-roots` = `asaot.three.NativeShaderRenderer` | 把渲染器塞进 `--air-app` 可达闭包 | **有通道、没有渲染器**：`RendererFactory` 探测落空，静默退回 `AGALRenderer`，`describe()` 报 `native renderer=false` |
+
+**为什么要 `extra-roots`**：`RendererFactory` 只能用 `getDefinitionByName("asaot.three.NativeShaderRenderer")`
+探测（AS3 没有「类是否存在」的常量测试，静态引用在缺失时是 `#1046`/`#1065`），而**字符串不产生引用边**，
+闭包看不见这个类。`shader-m30` 当初就踩过这个坑。
+
+**代价（实测 `apps/rotating-cube`，它一行 GLSL 都不写）**：默认 7 643 440 B → 增强 12 495 744 B，
+**+4.63 MB（+63%）**。原因是通道注册表从 `main` 可达，`-O2` 的调用图剪裁剪不掉它（§2.6 的
+`static` 化只对**不可达**的函数有效）。所以「所有 demo 都增强」是**一致性换体积**的选择：
+好处是任何 demo 都能直接跑 `ShaderMaterial`，代价是每个产物都驮着交叉编译器。
+真正发布时可以只给写 GLSL 的 demo 保留这两个文件。
+
+**行为不变的证据**（不是「看着一样」）：`m26-parity` 走 `NativeShaderRenderer` 与走 `AGALRenderer`
+读回的 4 行 `PARITY` 统计**逐位相同**（`35.5/22.62/82.29`、`22.17/19.07/29.93`、`32.65/16/84.36`、
+`20.76/17.07/28.86`）；`scene-m20`、`geometry-m11` 的整份日志逐字相同。`NativeShaderRenderer`
+`extends AGALRenderer` 且**不覆写**标准绘制路径，所以 AGAL 材质原样走老路。
+
+**AIR 侧完全不受影响**：`tools/build-demo.sh` 的 `build_air` 从不读这两个文件，`adl` 拿到的仍是默认
+构建，`shader-m30`/`shader-m31` 依旧打印 `NO-CHANNEL` 并以 0 退出（§8 红线）。
+
+**回退时必须清两处**：`--air-app` 会把 `features` **写进** `<Main>.build.json` 并在下次构建时沿用
+（会打 `enhancements carried over from ...` 警告）。只删 `features` 文件**不足以**关掉它——
+要么连 `<Main>.build.json` 一起删，要么用 `--features none`。
+
 
 ### 3. profile 与 AGAL 版本是**一对**决策
 

@@ -1,1 +1,3 @@
+# 全部 demo 统一按增强模式构建（README §2.2）：通道编进来，渲染器也留住。
+# 生产构建若不需要，删掉本文件 + extra-roots，并清掉 <Main>.build.json 的 features。
 native-shader
