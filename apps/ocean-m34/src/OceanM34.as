@@ -36,7 +36,8 @@
 //   water            ->  samples opaque for refraction; alpha = surface tag
 //   spray            ->  additive
 //   lens + shafts    ->  only when the camera is near/under the surface
-//   composite        ->  assemble, absorb, grade, one draw to the back buffer
+//   composite        ->  assemble and absorb, into the linear HDR target
+//   post             ->  metered exposure, bloom pyramid, tone map + grade -> back buffer
 //
 // THE CONTROL PANEL (M35) drives the same parameters `temp/ultra-water/src/main.js`
 // exposes through lil-gui: sun & sky, sea state, water optics, exposure and planar
@@ -124,6 +125,16 @@ package
         private static const CAUSTIC_NEAR:int = 512;
         private static const CAUSTIC_DEEP:int = 256;
         private static const CAUSTIC_CELLS:int = 128;
+
+        // Bloom pyramid depth and the auto-exposure metering grid, both the
+        // reference's (src/engine/PostFX.js: LEVELS = 6, METER = 32).
+        private static const BLOOM_LEVELS:int = 6;
+        private static const METER:int = 32;
+
+        // Adaptation rates, 1/s: the scene brightening closes the iris faster than it
+        // opens (~0.4 s vs ~1 s), so a flash does not chase the exposure for a second.
+        private static const ADAPT_UP:Number = 2.5;
+        private static const ADAPT_DOWN:Number = 1.0;
 
         private static const SPRAY_COUNT:int = 2600;
         private static const CHECK_ENABLED:Boolean = true;
@@ -237,12 +248,33 @@ package
         private var _refl:Object;
         private var _reflDepth:Object;
         private var _reflOff:Object;
+        // The internal render size. RW/RH are render scale 1.0's base (1152x720, i.e.
+        // 1.2x the 960x600 window); the panel's QUALITY row multiplies them and
+        // applyRenderScale() rebuilds the size-dependent targets when it changes.
+        private var _rw:int = RW;
+        private var _rh:int = RH;
+        private var _scaleApplied:Number = 1.0;
         private var _opaque:Object;
         private var _opaqueDepth:Object;
         private var _water:Object;
         private var _spray:Object;
         private var _lens:Object;
         private var _shafts:Object;
+
+        // The post chain. `_hdr` is what composite.frag writes (linear, pre-grade) and
+        // grade.frag reads; the bloom pyramid and the metered-exposure state hang off it.
+        private var _hdr:Object;
+        private var _bloom:Array = [];          // [i] -> level i, half, quarter, ...
+        private var _meter:Object;              // METER x METER log2 luminance
+        private var _adapt:Array = [];          // 1x1 ping-pong, [_adaptCur] is current
+        private var _adaptCur:int = 0;
+        private var _adaptSnap:Boolean = true;  // next metered frame replaces the state
+        private var _bloomW:Array = [];
+        private var _bloomH:Array = [];
+
+        // Smoothed underwater exposure compensation (the reference's `uwComp`): 1 above
+        // the surface, `underwaterExposure` below, eased so surfacing does not flash.
+        private var _uwComp:Number = 1.0;
 
         private var _mTrans:ShaderMaterial;
         private var _mMs:ShaderMaterial;
@@ -259,6 +291,12 @@ package
         private var _mLens:ShaderMaterial;
         private var _mShafts:ShaderMaterial;
         private var _mComposite:ShaderMaterial;
+        private var _mDownPre:ShaderMaterial;
+        private var _mDown:ShaderMaterial;
+        private var _mUp:ShaderMaterial;
+        private var _mMeter:ShaderMaterial;
+        private var _mAdapt:ShaderMaterial;
+        private var _mGrade:ShaderMaterial;
         private var _mProbe:ShaderMaterial;
         private var _mPresent:ShaderMaterial;
 
@@ -364,13 +402,13 @@ package
             this.makeMaterials();
             this.makeGeometry();
 
-            _camera = new PerspectiveCamera(50, RW / RH, 0.5, 12000);
+            _camera = new PerspectiveCamera(50, Number(_rw) / _rh, 0.5, 12000);
             _camera.position.set(0, 9, 150);
 
             // The reflection needs its own camera object: `render()` computes a camera's
             // world matrix from its transform, so the mirrored matrix has to be handed
             // over as a matrix (matrixAutoUpdate off) rather than decomposed.
-            _mirror = new PerspectiveCamera(50, RW / RH, 0.5, 12000);
+            _mirror = new PerspectiveCamera(50, Number(_rw) / _rh, 0.5, 12000);
             _mirror.matrixAutoUpdate = false;
 
             this.bakeAtmosphere();
@@ -388,7 +426,7 @@ package
             this.buildPanel();
 
             logLine("ocean-m34: 4 cascades (" + P0 + "/" + P1 + "/" + P2 + "/" + P3 + " m) x " +
-                N + " FFT, " + RW + "x" + RH + " internal; atmosphere + caustics + spray + " +
+                N + " FFT, " + _rw + "x" + _rh + " internal; atmosphere + caustics + spray + " +
                 "underwater + planar reflection; " + (18 * 4 + 14) + " passes/frame");
             logLine("ocean-m34 panel: " + _params.describe());
         }
@@ -419,8 +457,27 @@ package
         // Every render target. Float where the payload is not a colour: an FFT
         // intermediate and a view depth both need exact values, and half-float would
         // quantise a 4 km depth into ~4 m steps.
+        // Two sets, because only one of them depends on the render size.
+        //
+        // FIXED: the FFT cascades (N x N), the atmosphere LUTs, the caustics, the lens
+        // map, the metering grid and the exposure state. They are baked once -- the LUTs
+        // and the spectra in createScene, the caustics every frame -- so recreating them
+        // on a resize would throw away the bake and leave a black sky until the next edit
+        // of the sun. (Measured: it did exactly that.)
+        //
+        // SCREEN: everything sized from _rw x _rh, i.e. the scene targets, the reflection,
+        // the shafts and the post chain. Only this half is rebuilt by applyRenderScale().
         private function makeTargets():void
         {
+            this.makeFixedTargets();
+            this.makeScreenTargets();
+        }
+
+        private function makeFixedTargets():void
+        {
+            _h0 = []; _fftA = []; _fftB = []; _disp = []; _slope = [];
+            _adapt = []; _adaptCur = 0; _adaptSnap = true;
+
             var c:int;
             for (c = 0; c < 4; c++)
             {
@@ -446,20 +503,50 @@ package
             _causticNear = _native["createTexture"](CAUSTIC_NEAR, CAUSTIC_NEAR, "rgba32f", true, true);
             _causticDeep = _native["createTexture"](CAUSTIC_DEEP, CAUSTIC_DEEP, "rgba32f", true, true);
 
-            // mipmapped: the water samples this at a roughness-driven LOD, and a LOD past
-            // the last level of an unmipmapped target is black, not blurred.
-            _refl = _native["createTexture"](RW / 2, RH / 2, Context3DTextureFormat.RGBA_HALF_FLOAT, true, true);
-            _reflDepth = _native["createDepthTexture"](RW / 2, RH / 2, "depth32f");
+            _lens = _native["createTexture"](64, 36, "rgba32f", true, false);
+            _meter = _native["createTexture"](METER, METER, Context3DTextureFormat.RGBA_HALF_FLOAT, true, false);
+            // 1x1 ping-pong state, float: it holds one log-luminance and a half float
+            // would quantise it to ~1/1000 of an EV at the top of its range while the
+            // adaptation blends it over seconds.
+            _adapt.push(_native["createTexture"](1, 1, "rgba32f", true, false));
+            _adapt.push(_native["createTexture"](1, 1, "rgba32f", true, false));
+
             // Stand-in for "reflections off": the water program ALWAYS samples
             // uReflection, and an unbound sampler is a Metal validation failure that
             // draws nothing. 1x1 black, cleared once below.
             _reflOff = _native["createTexture"](1, 1, Context3DTextureFormat.RGBA_HALF_FLOAT, false, false);
-            _opaque = _native["createTexture"](RW, RH, Context3DTextureFormat.RGBA_HALF_FLOAT, true, false);
-            _opaqueDepth = _native["createDepthTexture"](RW, RH, "depth32f");
-            _water = _native["createTexture"](RW, RH, Context3DTextureFormat.RGBA_HALF_FLOAT, true, false);
-            _spray = _native["createTexture"](RW, RH, Context3DTextureFormat.RGBA_HALF_FLOAT, true, false);
-            _lens = _native["createTexture"](64, 36, "rgba32f", true, false);
-            _shafts = _native["createTexture"](RW / 4, RH / 4, Context3DTextureFormat.RGBA_HALF_FLOAT, true, false);
+        }
+
+        private function makeScreenTargets():void
+        {
+            _bloom = []; _bloomW = []; _bloomH = [];
+
+            // mipmapped: the water samples this at a roughness-driven LOD, and a LOD past
+            // the last level of an unmipmapped target is black, not blurred.
+            _refl = _native["createTexture"](_rw / 2, _rh / 2, Context3DTextureFormat.RGBA_HALF_FLOAT, true, true);
+            _reflDepth = _native["createDepthTexture"](_rw / 2, _rh / 2, "depth32f");
+            _opaque = _native["createTexture"](_rw, _rh, Context3DTextureFormat.RGBA_HALF_FLOAT, true, false);
+            _opaqueDepth = _native["createDepthTexture"](_rw, _rh, "depth32f");
+            _water = _native["createTexture"](_rw, _rh, Context3DTextureFormat.RGBA_HALF_FLOAT, true, false);
+            _spray = _native["createTexture"](_rw, _rh, Context3DTextureFormat.RGBA_HALF_FLOAT, true, false);
+            _shafts = _native["createTexture"](_rw / 4, _rh / 4, Context3DTextureFormat.RGBA_HALF_FLOAT, true, false);
+
+            // --- post -------------------------------------------------------
+            // Linear HDR: half float because the sun disc and the glitter road are well
+            // above 1 and the bloom threshold is a real value on this scale.
+            _hdr = _native["createTexture"](_rw, _rh, Context3DTextureFormat.RGBA_HALF_FLOAT, true, false);
+
+            var w:int = _rw;
+            var h:int = _rh;
+            var i:int;
+            for (i = 0; i < BLOOM_LEVELS; i++)
+            {
+                w = w / 2; if (w < 1) w = 1;
+                h = h / 2; if (h < 1) h = 1;
+                _bloomW.push(w);
+                _bloomH.push(h);
+                _bloom.push(_native["createTexture"](w, h, Context3DTextureFormat.RGBA_HALF_FLOAT, true, false));
+            }
         }
 
         private function makeMaterials():void
@@ -533,6 +620,24 @@ package
 
             _mComposite = this.mat(OceanM34Assets.program("composite_frag", null),
                                    OceanM34Assets.program("quad", null));
+
+            // --- post: bloom pyramid, auto exposure, grade ---
+            // The prefilter is the SAME shader with the PREFILTER define, so the soft
+            // knee and the Karis weighting exist in exactly one place (PostFX.js builds
+            // its two downsample materials the same way).
+            _mDownPre = this.mat(OceanM34Assets.program("bloom_down_frag", null),
+                                 OceanM34Assets.program("quad", null));
+            _mDownPre.defines = { PREFILTER: 1 };
+            _mDown = this.mat(OceanM34Assets.program("bloom_down_frag", null),
+                              OceanM34Assets.program("quad", null));
+            _mUp = this.mat(OceanM34Assets.program("bloom_up_frag", null),
+                            OceanM34Assets.program("quad", null));
+            _mMeter = this.mat(OceanM34Assets.program("meter_frag", null),
+                               OceanM34Assets.program("quad", null));
+            _mAdapt = this.mat(OceanM34Assets.program("adapt_frag", null),
+                               OceanM34Assets.program("quad", null));
+            _mGrade = this.mat(OceanM34Assets.program("grade_frag", null),
+                               OceanM34Assets.program("quad", null));
 
             _mProbe = this.mat(PROBE_FS, OceanM34Assets.program("quad", null));
             _mPresent = this.mat(OceanM34Assets.program("present_frag", null), OceanM34Assets.program("quad", null));
@@ -784,6 +889,7 @@ package
             this.drawSpray();
             this.drawUnderwater();
             this.drawComposite();
+            this.drawPost(dt);
             _frames++;
         }
 
@@ -854,8 +960,40 @@ package
                                     p.swellDirection != _appliedSwellDir);
 
             this.markParamsApplied();
+            this.applyRenderScale();
             if (sunDirty) this.bakeAtmosphere();
             if (seaMoved) this.bakeSpectra();
+        }
+
+        // QUALITY -> the internal render size. The reference does the same thing through
+        // three's setPixelRatio(devicePixelRatio * quality.resolution) and a makeTargets()
+        // that disposes the old render targets; here the size-dependent set is _opaque /
+        // _water / _spray / _shafts / _refl / _hdr / the bloom pyramid, and the native
+        // channel has no texture dispose, so the old set is left to the collector and the
+        // panel offers six steps instead of a continuous slider (see OceanParams.SCALES).
+        //
+        // Below 1.0 the frame is rendered smaller than the window and the grade pass
+        // magnifies it: a real speed knob at the cost of sharpness. Above 1.0 the grade
+        // pass runs its four-tap box (`uSuper`) and that is this chain's antialiasing.
+        private function applyRenderScale():void
+        {
+            var s:Number = _params.renderScale;
+            if (!(s > 0.05)) s = 1.0;
+            if (s == _scaleApplied) return;
+
+            var w:int = Math.round(RW * s);
+            var h:int = Math.round(RH * s);
+            if (w < 64) w = 64;
+            if (h < 64) h = 64;
+            if (w == _rw && h == _rh) { _scaleApplied = s; return; }
+
+            _scaleApplied = s;
+            _rw = w;
+            _rh = h;
+            this.makeScreenTargets();
+            _fnBackBuffer();
+            logLine("ocean-m34 render scale " + s + " -> " + _rw + "x" + _rh +
+                    " (drawable " + stage.stageWidth + "x" + stage.stageHeight + ")");
         }
 
         // ------------------------------------------------------------------
@@ -1216,13 +1354,22 @@ package
             m.setUniformValue("uColor", _opaque);
             m.setUniformValue("uSunDir", [_sunX, _sunY, _sunZ]);
             m.setUniformValue("uAbsorption", _params.absorption);
-            m.setUniformValue("uUnder", [0.055, 0.9, 42.0, 0.0]);
+            // Turbidity belongs to THIS pass: it is the extinction the shaft march
+            // integrates, so a muddy column both kills the god rays and fogs from the
+            // camera out. (It was left as a constant here after the panel landed, and
+            // the self-check's shaft statistics stayed identical at every turbidity --
+            // that is what caught it.)
+            m.setUniformValue("uUnder", [_params.scattering, _params.shafts,
+                                         _params.shaftRange, 0.0]);
             m.setUniformValue("uFrame", _frames % 64);
             m.setUniformValue("uCaustics", _causticNear);
             m.setUniformValue("uCausticsDeep", _causticDeep);
             this.pass(m, [_shafts], null);
         }
 
+        // Assemble + absorb into `_hdr` (LINEAR). The grade moved out: bloom and auto
+        // exposure both need values before the tone map, and a pass cannot read the
+        // target it is writing.
         private function drawComposite():void
         {
             var m:ShaderMaterial = _mComposite;
@@ -1234,29 +1381,158 @@ package
             m.setUniformValue("uAbsorption", _params.absorption);
             m.setUniformValue("uScatterColor", _params.scatter);
             m.setUniformValue("uSunColor", _sunCol);
-            m.setUniformValue("uUnder", [0.055, 0.9, 42.0, 0.0]);
-            m.setUniformValue("uExposure", _params.exposure);
+            // Turbidity and the shaft strength are panel state now (UNDERWATER
+            // section); the fourth word is unused by the pass.
+            m.setUniformValue("uUnder", [_params.scattering, _params.shafts,
+                                         _params.shaftRange, 0.0]);
 
             if (TRACE_PROGRAMS && !_dbgDescribed)
             {
                 _dbgDescribed = true;
                 logLine("COMPOSITE PROGRAM:\n" + _nr.describeProgram(m));
             }
-            // One composite, straight into the back buffer. An intermediate _final
-            // texture plus a copy sampled by the window compositor disagreed with
-            // the same texture read back with drawToBitmapData: the window showed
-            // the opaque pass while the readback showed the graded frame.
+            // Straight into the HDR target, which is an ordinary render target and so
+            // agrees with the row convention every other offscreen pass uses. It is
+            // grade.frag (drawPost) that writes the DRAWABLE, and it is why the earlier
+            // "_final + copy" experiment disagreed with the window: the back buffer is
+            // the only surface whose row order differs, so it must be written once, by
+            // the pass that also does the sRGB encode.
+            this.pass(m, [_hdr], null);
+        }
+
+        // ------------------------------------------------------------------
+        // Post: metered exposure, bloom, tone map, grade -- the reference's PostFX.js
+        // reduced to the passes this port has a backer for. Everything stays on the
+        // GPU: the adapted exposure lives in a 1x1 float target and is read by the
+        // grade pass with texelFetch, so a frame never stalls on a readback.
+        // ------------------------------------------------------------------
+        private function drawPost(dt:Number):void
+        {
+            var p:OceanParams = _params;
+            var i:int;
+            var key:Number = Math.max(p.keyValue, 1e-4);
+            var lo:Number = Math.min(p.minExposure, p.maxExposure);
+            var hi:Number = Math.max(p.minExposure, p.maxExposure);
+            if (lo < 1e-4) lo = 1e-4;
+
+            // Underwater exposure compensation, eased like the reference's `uwComp`.
+            var want:Number = _underwater ? p.underwaterExposure : 1.0;
+            var ease:Number = dt * 3.0;
+            if (ease > 1.0) ease = 1.0;
+            _uwComp = _uwComp + (want - _uwComp) * ease;
+
+            // --- 1. meter the frame, then adapt the 1x1 state ------------------
+            if (p.autoExposure)
+            {
+                var f:int = _frames % 256;
+                // R2 sequence: every pair of consecutive frames fills the grid more
+                // evenly than a random jitter would, and it never repeats early.
+                _mMeter.setUniformValue("uSrc", _hdr);
+                _mMeter.setUniformValue("uJitter",
+                    [frac(f * 0.7548776662466927), frac(f * 0.5698402909980532)]);
+                this.pass(_mMeter, [_meter], null);
+
+                _mAdapt.setUniformValue("uSrc", _meter);
+                _mAdapt.setUniformValue("uPrev", _adapt[_adaptCur]);
+                _mAdapt.setUniformValue("uK",
+                    [_adaptSnap ? 1.0 : 1.0 - Math.exp(-dt * ADAPT_UP),
+                     _adaptSnap ? 1.0 : 1.0 - Math.exp(-dt * ADAPT_DOWN)]);
+                // keep the state inside the range the exposure clamp can show, so it
+                // never winds up during a long underwater stretch
+                _mAdapt.setUniformValue("uRange",
+                    [Math.log(key / hi) * 1.4426950408889634,
+                     Math.log(key / lo) * 1.4426950408889634]);
+                _adaptCur = 1 - _adaptCur;
+                this.pass(_mAdapt, [_adapt[_adaptCur]], null);
+                _adaptSnap = false;
+            }
+            else
+            {
+                // the state goes stale while auto is off; snap when it comes back
+                _adaptSnap = true;
+            }
+
+            // --- 2. bloom pyramid ---------------------------------------------
+            // Skipped entirely at strength 0 (the reference does the same): six
+            // downsamples plus five upsamples cost more than this demo's water pass.
+            if (p.bloomStrength > 0.0)
+            {
+                var th:Number = p.bloomThreshold;
+                var knee:Number = Math.max(th * 0.5, 1e-4);
+                _mDownPre.setUniformValue("uSrc", _hdr);
+                _mDownPre.setUniformValue("uTexel", [1.0 / _rw, 1.0 / _rh]);
+                _mDownPre.setUniformValue("uCurve", [th - knee, 2.0 * knee, 0.25 / knee, th]);
+                _mDownPre.setUniformValue("uClamp", p.bloomClamp);
+                this.pass(_mDownPre, [_bloom[0]], null);
+
+                for (i = 1; i < BLOOM_LEVELS; i++)
+                {
+                    _mDown.setUniformValue("uSrc", _bloom[i - 1]);
+                    _mDown.setUniformValue("uTexel", [1.0 / _bloomW[i - 1], 1.0 / _bloomH[i - 1]]);
+                    this.pass(_mDown, [_bloom[i]], null);
+                }
+                for (i = BLOOM_LEVELS - 2; i >= 0; i--)
+                {
+                    _mUp.setUniformValue("uSrc", _bloom[i + 1]);
+                    _mUp.setUniformValue("uTexel", [1.0 / _bloomW[i + 1], 1.0 / _bloomH[i + 1]]);
+                    // additive: the pyramid accumulates downwards, so the wide dim tail
+                    // comes from the small levels instead of replacing them
+                    _fnSetTargets([_bloom[i]], null);
+                    _context.setBlendFactors("one", "one");
+                    _context.setCulling("frontAndBack");
+                    _nr.drawNative(_quad, _mUp);
+                    _context.setCulling("back");
+                    _context.setBlendFactors("one", "zero");
+                    _draws++;
+                }
+            }
+
+            // --- 3. grade into the back buffer --------------------------------
+            _mGrade.setUniformValue("uHdr", _hdr);
+            // Both samplers must stay bound even when their pass was skipped: an
+            // unbound sampler in a Metal draw is a validation failure that writes
+            // nothing (measured in this demo, not assumed).
+            _mGrade.setUniformValue("uBloom", _bloom[0]);
+            _mGrade.setUniformValue("uExpo", _adapt[_adaptCur]);
+            _mGrade.setUniformValue("uExposure", p.exposure * _uwComp);
+            _mGrade.setUniformValue("uAuto", p.autoExposure ? 1.0 : 0.0);
+            _mGrade.setUniformValue("uExpoRange", [key, lo, hi]);
+            _mGrade.setUniformValue("uBloomStrength", p.bloomStrength);
+            _mGrade.setUniformValue("uContrast", p.contrast);
+            _mGrade.setUniformValue("uSaturation", p.saturation);
+            _mGrade.setUniformValue("uVignette", p.vignette);
+            // The drawable's texel size drives the four-tap box, and the box is only
+            // wanted when the internal frame is LARGER than the drawable -- at scale <= 1
+            // the grade is a magnifier, and four taps there would cost three reads for a
+            // filter bilinear already does.
+            _mGrade.setUniformValue("uDstTexel", [1.0 / stage.stageWidth, 1.0 / stage.stageHeight]);
+            _mGrade.setUniformValue("uSuper", _rw > stage.stageWidth ? 1.0 : 0.0);
+
             _fnBackBuffer();
             _context.clear(0, 0, 0, 1);
             _context.setCulling("frontAndBack");
-            _nr.drawNative(_quad, m);
+            _nr.drawNative(_quad, _mGrade);
             _context.setCulling("back");
             _draws++;
+
             if (DUMP_FRAME && _frames == DUMP_AT && !_dumped)
             {
                 _dumped = true;
+                logLine("dbg: uw=" + _underwater + " uwComp=" + _uwComp + " expo=" + p.exposure +
+                        " auto=" + p.autoExposure + " bloom=" + p.bloomStrength +
+                        " contrast=" + p.contrast + " sat=" + p.saturation + " vig=" + p.vignette);
                 this.dumpFrame("../../temp/m34-frame.ppm");
             }
+            if (DUMP_FRAME && _frames == DUMP_AT + 1)
+            {
+                this.dumpSource(_hdr, "../../temp/m34-hdr.ppm");
+            }
+        }
+
+        private static function frac(v:Number):Number
+        {
+            var f:Number = v - Math.floor(v);
+            return f;
         }
 
         // Read the composed frame back with drawToBitmapData and write it as a binary

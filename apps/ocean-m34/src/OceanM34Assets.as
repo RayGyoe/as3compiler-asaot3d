@@ -90,6 +90,18 @@ package
         [Embed(source="../../../assets/ocean/present.frag", mimeType="application/octet-stream")]
         private static const PRESENT_FRAG:Class;
 
+        // ---- post (Ultra-Water src/engine/PostFX.js) ----
+        [Embed(source="../../../assets/ocean/bloom_down.frag", mimeType="application/octet-stream")]
+        private static const BLOOM_DOWN_FRAG:Class;
+        [Embed(source="../../../assets/ocean/bloom_up.frag", mimeType="application/octet-stream")]
+        private static const BLOOM_UP_FRAG:Class;
+        [Embed(source="../../../assets/ocean/meter.frag", mimeType="application/octet-stream")]
+        private static const METER_FRAG:Class;
+        [Embed(source="../../../assets/ocean/adapt.frag", mimeType="application/octet-stream")]
+        private static const ADAPT_FRAG:Class;
+        [Embed(source="../../../assets/ocean/grade.frag", mimeType="application/octet-stream")]
+        private static const GRADE_FRAG:Class;
+
         private static var _cache:Object = {};
 
         // One asset as text. Cached: a program is compiled once per material, but the
@@ -170,7 +182,12 @@ package
             lens_frag: LENS_FRAG,
             shafts_frag: SHAFTS_FRAG,
             composite_frag: COMPOSITE_FRAG,
-            present_frag: PRESENT_FRAG
+            present_frag: PRESENT_FRAG,
+            bloom_down_frag: BLOOM_DOWN_FRAG,
+            bloom_up_frag: BLOOM_UP_FRAG,
+            meter_frag: METER_FRAG,
+            adapt_frag: ADAPT_FRAG,
+            grade_frag: GRADE_FRAG
         };
     }
 }

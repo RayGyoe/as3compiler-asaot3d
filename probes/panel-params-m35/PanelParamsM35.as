@@ -63,8 +63,16 @@ check("A7 water optics defaults",
     p.reflectionDistort == 0.04 && p.glint == 0.6);
 check("A8 foam defaults", p.foamBias == 0.05 && p.foamScale == 1.3);
 check("A9 post + switches",
-    p.exposure == 0.45 && p.reflections == true && p.view == 0);
+    p.exposure == 0.45 && p.autoExposure == false && p.reflections == true && p.view == 0);
 check("A10 preset 0 is the port's own colour", p.preset == 0);
+check("A10b the post chain's own defaults are PostFX.js's",
+    p.keyValue == 0.18 && p.minExposure == 0.05 && p.maxExposure == 20.0 &&
+    p.bloomStrength == 0.05 && p.bloomThreshold == 1.5 && p.bloomClamp == 64.0 &&
+    p.contrast == 1.0 && p.saturation == 1.0 && p.vignette == 0.22);
+check("A10c the underwater defaults are the reference's scattering/shafts",
+    p.scattering == 0.055 && p.shafts == 0.9 && p.shaftRange == 42.0 &&
+    p.underwaterExposure == 0.55);
+check("A10d the render size starts at 1x", p.renderScale == 1.0);
 check("A11 construction seeds absorption = base / clarity",
     near(p.absorption[0], 0.17) && near(p.absorption[1], 0.055) &&
     near(p.absorption[2], 0.038));
@@ -91,7 +99,7 @@ check("B7 NaN clamps to 0", OceanParams.norm(Math.sqrt(-1), 0, 10) == 0);
 // C. every table entry is a name the model knows
 // ---------------------------------------------------------------------------
 var tables:Array = [OceanParams.SUN, OceanParams.WAVES,
-                    OceanParams.WATER, OceanParams.POST];
+                    OceanParams.WATER, OceanParams.POST, OceanParams.UNDERWATER];
 var t:int = 0;
 var total:int = 0;
 while (t < tables.length)
@@ -111,25 +119,37 @@ while (t < tables.length)
     }
     t++;
 }
-check("C" + (total + 1) + " the tables cover 21 controls", total == 21);
+// 4 sun + 9 waves + 7 water + 7 post + 4 underwater. The QUALITY row is a
+// SELECT (see section H), not a slider table, so it is not counted here.
+check("CT the tables cover 31 controls", total == 31);
 
-// the documented clamps
+// the documented clamps (K: kept out of the C numbering so the table loop and the
+// clamp list cannot collide when a row is added)
 p.setValue("cloudCoverage", 1.5);
-check("C23 cloud coverage clamps to 1", p.cloudCoverage == 1);
+check("K1 cloud coverage clamps to 1", p.cloudCoverage == 1);
 p.setValue("windSpeed", 0);
-check("C24 wind speed floors at 0.1 (a zero-wind spectrum is NaN)", p.windSpeed == 0.1);
+check("K2 wind speed floors at 0.1 (a zero-wind spectrum is NaN)", p.windSpeed == 0.1);
 p.setValue("exposure", 0);
-check("C25 exposure floors at 0.01", p.exposure == 0.01);
+check("K3 exposure floors at 0.01", p.exposure == 0.01);
 p.setValue("glint", 2);
-check("C26 glint clamps to 1", p.glint == 1);
+check("K4 glint clamps to 1", p.glint == 1);
 p.setValue("sunAzimuth", -10);
-check("C27 azimuth wraps into 0..360 (not a clamp)", near(p.sunAzimuth, 350));
+check("K5 azimuth wraps into 0..360 (not a clamp)", near(p.sunAzimuth, 350));
 p.setValue("sunAzimuth", 370);
-check("C28 azimuth wraps down", near(p.sunAzimuth, 10));
+check("K6 azimuth wraps down", near(p.sunAzimuth, 10));
 p.setValue("clarity", 0);
-check("C29 clarity floors at 0.05 rather than dividing by zero", p.clarity == 0.05);
+check("K7 clarity floors at 0.05 rather than dividing by zero", p.clarity == 0.05);
 p.setValue("fetchKm", 0);
-check("C30 fetch floors at 1 km", p.fetchKm == 1);
+check("K8 fetch floors at 1 km", p.fetchKm == 1);
+p.setValue("scattering", -1);
+check("K9 turbidity is non-negative (a negative extinction amplifies light)",
+    p.scattering == 0);
+p.setValue("saturation", -1);
+check("K10 saturation is non-negative (a negative pull inverts hue)", p.saturation == 0);
+p.setValue("renderScale", 0);
+check("K11 render scale clamps to the menu floor (0.5x)", p.renderScale == 0.5);
+p.setValue("renderScale", 9);
+check("K12 render scale clamps to the menu ceiling (2x)", p.renderScale == 2.0);
 
 // ---------------------------------------------------------------------------
 // D. water colour: preset x clarity
@@ -173,7 +193,8 @@ p.reflections = false;
 p.view = 4;
 p.reset();
 check("E1 reset restores the scalars",
-    p.sunElevation == 3.5 && p.windSpeed == 9.0 && p.exposure == 0.45);
+    p.sunElevation == 3.5 && p.windSpeed == 9.0 && p.exposure == 0.45 &&
+    p.autoExposure == false);
 check("E2 reset restores clarity AND the derived absorption",
     p.clarity == 1.0 && near(p.absorption[0], 0.17) &&
     near(p.absorption[1], 0.055) && near(p.absorption[2], 0.038));
@@ -182,6 +203,26 @@ check("E3 reset restores the preset's scatter",
     near(p.scatter[2], 0.085));
 check("E4 reset restores the switches",
     p.reflections == true && p.view == 0 && p.preset == 0);
+
+// ---------------------------------------------------------------------------
+// H. render scale is a stepped menu, not a slider
+// ---------------------------------------------------------------------------
+// The steps exist because each value rebuilds every size-dependent render target
+// and the native channel has no texture dispose; six steps bound that. These pin
+// the mapping the panel and the app both read.
+check("H1 six steps, 0.5x through 2x",
+    OceanParams.SCALES.length == 6 && OceanParams.SCALES[0] == 0.5 &&
+    OceanParams.SCALES[5] == 2.0);
+check("H2 labels are the value with an x, integers without a decimal point",
+    OceanParams.scaleLabels()[0] == "0.5x" && OceanParams.scaleLabels()[2] == "1x" &&
+    OceanParams.scaleLabels()[5] == "2x");
+check("H3 scaleIndex finds the exact step",
+    OceanParams.scaleIndex(1.0) == 2 && OceanParams.scaleIndex(2.0) == 5);
+check("H4 scaleIndex snaps to the NEAREST step",
+    OceanParams.scaleIndex(0.9) == 2 && OceanParams.scaleIndex(0.55) == 0 &&
+    OceanParams.scaleIndex(1.9) == 5);
+check("H5 renderScale round-trips through the model",
+    near(p.valueOf("renderScale"), p.renderScale));
 
 // ---------------------------------------------------------------------------
 // F. describe()

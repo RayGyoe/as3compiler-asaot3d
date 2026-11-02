@@ -138,17 +138,43 @@ package panel
             this.addRows(body, OceanParams.WATER, cb);
             this.addDivider(body);
 
-            this.addSection(body, "POST", OceanParams.POST, cb);
+            // ---- post -------------------------------------------------------
+            body.push(this.header("POST"));
+            body.push(checkbox({ key: "autoExposure", label: "Auto exposure",
+                checked: p.autoExposure,
+                onChange: function (v:Boolean):void { p.autoExposure = v; cb(Dirty.ALL); } }));
+            this.addRows(body, OceanParams.POST, cb);
+            this.addDivider(body);
+
+            // ---- underwater -------------------------------------------------
+            // The reference files these under "Floaters & underwater"; this port has no
+            // flotsam, so the folder is named for what it actually holds.
+            this.addSection(body, "UNDERWATER", OceanParams.UNDERWATER, cb);
             this.addDivider(body);
 
             // ---- quality ----------------------------------------------------
             body.push(this.header("QUALITY"));
+            body.push(select({ key: "scale",
+                value: OceanParams.scaleLabels()[OceanParams.scaleIndex(p.renderScale)],
+                options: OceanParams.scaleLabels(), width: inner,
+                open: this._openKey == "scale",
+                onOpenChange: function (o:Boolean):void { self.setOpen(o, "scale"); },
+                onSelect: function (i:int):void
+                {
+                    p.renderScale = OceanParams.SCALES[i];
+                    self.setOpen(false, "scale");
+                    cb(Dirty.ALL);
+                } }));
             body.push(checkbox({ key: "reflections", label: "Planar reflections",
                 checked: p.reflections,
                 onChange: function (v:Boolean):void { p.reflections = v; cb(Dirty.ALL); } }));
-            // The one row the web GUI has that this port cannot honour at runtime.
-            // Said out loud instead of drawn as a dead control.
-            body.push(text("resolution / MSAA: fixed at build",
+            // The web GUI's `msaa` row cannot exist here: the native channel's render
+            // targets are single-sample (multisampling lives on the drawable, and this
+            // demo never draws geometry into it). Render scale above 1 resolves the
+            // bigger internal target with a four-tap box in grade.frag -- real
+            // antialiasing, done at the resize -- and the note says which is which
+            // instead of pretending a 2x/4x/8x menu exists.
+            body.push(text("MSAA: n/a (offscreen chain) \u00b7 scale > 1 supersamples",
                 { text: { fontSize: 10, color: 0x6E7A90 } }));
 
             return column({ alignItems: "flex-end", size: [Length.pct(1), Length.pct(1)] }, [

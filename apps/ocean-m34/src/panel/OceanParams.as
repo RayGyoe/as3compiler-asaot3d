@@ -19,14 +19,24 @@
 //     reference's six. Applying "clear" would otherwise repaint the accepted sea.
 //
 // WHAT IS NOT HERE, and why (all reported in the log at startup):
-//   * scatter colour as a colour picker -- asaotui has no colour widget yet, so
-//     the presets are the only way to move it.
-//   * turbidity / contrast / saturation / bloom -- the ported shaders do not
-//     declare those uniforms (the LUT is baked from fixed Rayleigh/Mie/ozone
-//     coefficients and the composite grades with one exposure multiply). Adding
-//     them would mean editing the shaders, which are the original author's.
-//   * render resolution / MSAA -- both are baked into the target sizes and the
-//     pass list at createScene(); a live change is a rebuild, not a drag.
+//   * scatter colour as a colour picker -- asaotui has no colour widget yet, so the
+//     presets are the only way to move it.
+//   * MSAA -- the native channel's render targets have ONE sample: multisampling
+//     exists only on the drawable, and this demo never draws geometry there (the
+//     whole frame is offscreen and composited). `renderScale` above 1 is the honest
+//     substitute and is what the QUALITY section offers: supersampling, resolved by
+//     the four-tap box in grade.frag.
+//   * lens droplets and the meniscus band -- neither is in the ported pass list yet,
+//     so a slider would be a picture of a control.
+//
+// THE GRADE'S DEFAULTS ARE IDENTITY, NOT THE REFERENCE'S. Ultra-Water ships its AgX
+// look at contrast 1.12 / saturation 1.3 (PostFX.js defaults, which main.js does not
+// override). This port's grade is ACES plus a 0.22 vignette, and its accepted frame
+// was rendered at contrast 1.0 / saturation 1.0: copying those two numbers across
+// two different tone curves would not buy parity, it would buy an unverified image.
+// The ranges are the reference's, so the same slider in the same place does the same
+// thing; only the starting point differs, and the panel is one drag away from the
+// web's look.
 package panel
 {
     public class OceanParams
@@ -60,6 +70,39 @@ package panel
 
         public var exposure:Number = 0.45;
 
+        // ---- post (PostFX.js) --------------------------------------------
+        // Auto exposure meters the HDR frame into a 32x32 log-luminance grid and adapts
+        // a 1x1 exposure over ~0.4 s / ~1 s (brighten / darken). `exposure` is then an
+        // exposure COMPENSATION (1 = meter-neutral) instead of an absolute multiplier,
+        // exactly like the reference's `ui.exposure * uwComp`.
+        public var autoExposure:Boolean = false;
+        public var keyValue:Number = 0.18;          // 0.18 puts the geometric mean at middle grey
+        public var minExposure:Number = 0.05;
+        public var maxExposure:Number = 20.0;
+        public var bloomStrength:Number = 0.05;     // main.js's override of the class default
+        public var bloomThreshold:Number = 1.5;     // ditto: only above-white blooms
+        public var bloomClamp:Number = 64.0;
+        public var contrast:Number = 1.0;           // identity: see the header note
+        public var saturation:Number = 1.0;
+        public var vignette:Number = 0.22;          // the composite's own vignette
+
+        // ---- underwater (UnderwaterPass.js) ------------------------------
+        // `scattering` is the turbidity of the water column: it is added to the
+        // extinction in the shaft march, so a muddy sea loses its god rays and fogs
+        // the frame from the camera out. The reference's sliders are `scattering`
+        // (0..0.5) and `shafts`/`shaftRange`; `underwaterExposure` is its `look`
+        // compensation that keeps a submerged camera from metering to milk.
+        public var scattering:Number = 0.055;      // 1/m, matches PRESETS[0]
+        public var shafts:Number = 0.9;
+        public var shaftRange:Number = 42.0;        // metres
+        public var underwaterExposure:Number = 0.55;
+
+        // ---- quality -----------------------------------------------------
+        // Multiplies the internal render size (RW x RH). Above 1 the HDR target is
+        // larger than the window and grade.frag resolves it with a four-tap box, which
+        // is this chain's antialiasing (see the header note about MSAA).
+        public var renderScale:Number = 1.0;
+
         public var reflections:Boolean = true;
 
         // Which named camera the frame loop should use. 0 is the demo's own 26 s
@@ -76,6 +119,9 @@ package panel
         public var absorption:Array = [0.17, 0.055, 0.038];
         public var absorbBase:Array = [0.17, 0.055, 0.038];
         public var scatter:Array = [0.010, 0.062, 0.085];
+        // Per-preset tint of thin foam, as a multiplier on the port's own foam shading
+        // (see PRESETS). [1,1,1] is the port's look, so preset 0 is a no-op.
+        public var foamTint:Array = [1.0, 1.0, 1.0];
 
         // ------------------------------------------------------------------
         // tables (single source of truth for ranges + labels)
@@ -111,8 +157,53 @@ package panel
         ];
 
         public static const POST:Array = [
-            ["exposure", "Exposure", 0.25, 4, 2]
+            ["exposure", "Exposure", 0.25, 4, 2],
+            ["keyValue", "Key value", 0.05, 0.6, 2],
+            ["bloomStrength", "Bloom", 0, 0.5, 3],
+            ["bloomThreshold", "Bloom thresh", 0, 10, 2],
+            ["contrast", "Contrast", 0.7, 1.6, 2],
+            ["saturation", "Saturation", 0, 2, 2],
+            ["vignette", "Vignette", 0, 1, 2]
         ];
+
+        public static const UNDERWATER:Array = [
+            ["scattering", "Turbidity", 0, 0.5, 3],
+            ["shafts", "Sun shafts", 0, 4, 2],
+            ["shaftRange", "Shaft range", 5, 120, 0],
+            ["underwaterExposure", "Underwater exp", 0.2, 2, 2]
+        ];
+
+        // Render scale is a SELECT, not a slider: every value rebuilds every
+        // size-dependent render target, and the native channel has no texture dispose,
+        // so a drag across a continuous range would leak one target set per pixel of
+        // travel. Six steps bound the rebuilds and the leak, and match the "snap to a
+        // quality preset" feel of the reference's own resolution row.
+        public static const SCALES:Array = [0.5, 0.75, 1.0, 1.25, 1.5, 2.0];
+
+        public static function scaleLabels():Array
+        {
+            var out:Array = [];
+            for (var i:int = 0; i < SCALES.length; i++)
+            {
+                var v:Number = SCALES[i];
+                out.push((v == Math.floor(v) ? String(int(v)) : String(v)) + "x");
+            }
+            return out;
+        }
+
+        // Index of the scale nearest `v`, so a value restored from elsewhere still
+        // highlights a row.
+        public static function scaleIndex(v:Number):int
+        {
+            var best:int = 0;
+            var bd:Number = Math.abs(SCALES[0] - v);
+            for (var i:int = 1; i < SCALES.length; i++)
+            {
+                var d:Number = Math.abs(SCALES[i] - v);
+                if (d < bd) { bd = d; best = i; }
+            }
+            return best;
+        }
 
         // Camera menu. Order IS the index stored in `view`, and the first entry is
         // the demo's own loop -- an out-of-range view falls back to it.
@@ -126,16 +217,21 @@ package panel
             "Underwater"
         ];
 
-        // [name, absorption r/g/b, scatter r/g/b]. Index 0 is the port's own look;
-        // 1..6 are the reference's WATER_PRESETS in its own order.
+        // [name, absorption r/g/b, scatter r/g/b, foam tint r/g/b, turbidity]. Index 0
+        // is the port's own look; 1..6 are the reference's WATER_PRESETS in its own
+        // order, with their own foam tint and `underwater.scattering`.
+        //
+        // The foam tint is a MULTIPLIER here (1,1,1 = the port's existing foam), not the
+        // albedo base the reference replaces: the port's foam shading is a different
+        // formula, and re-basing it would repaint the accepted image.
         public static const PRESETS:Array = [
-            ["port default", [0.17, 0.055, 0.038], [0.010, 0.062, 0.085]],
-            ["clear", [0.42, 0.075, 0.048], [0.0, 0.05, 0.08]],
-            ["tropical", [0.36, 0.045, 0.06], [0.0, 0.085, 0.085]],
-            ["toxic green", [0.45, 0.1, 1.1], [0.05, 0.1, 0.004]],
-            ["purple", [0.22, 0.85, 0.1], [0.05, 0.0, 0.09]],
-            ["rust orange", [0.1, 0.34, 1.2], [0.11, 0.035, 0.004]],
-            ["murky brown", [0.55, 0.62, 0.9], [0.045, 0.045, 0.022]]
+            ["port default", [0.17, 0.055, 0.038], [0.010, 0.062, 0.085], [1.0, 1.0, 1.0], 0.055],
+            ["clear", [0.42, 0.075, 0.048], [0.0, 0.05, 0.08], [0.62, 0.78, 0.82], 0.03],
+            ["tropical", [0.36, 0.045, 0.06], [0.0, 0.085, 0.085], [0.66, 0.86, 0.84], 0.02],
+            ["toxic green", [0.45, 0.1, 1.1], [0.05, 0.1, 0.004], [0.74, 0.84, 0.42], 0.08],
+            ["purple", [0.22, 0.85, 0.1], [0.05, 0.0, 0.09], [0.8, 0.66, 0.88], 0.04],
+            ["rust orange", [0.1, 0.34, 1.2], [0.11, 0.035, 0.004], [0.9, 0.72, 0.55], 0.1],
+            ["murky brown", [0.55, 0.62, 0.9], [0.045, 0.045, 0.022], [0.78, 0.74, 0.6], 0.25]
         ];
 
         public static function presetLabels():Array
@@ -196,6 +292,17 @@ package panel
             if (name == "foamScale") return this.foamScale;
             if (name == "glint") return this.glint;
             if (name == "exposure") return this.exposure;
+            if (name == "keyValue") return this.keyValue;
+            if (name == "bloomStrength") return this.bloomStrength;
+            if (name == "bloomThreshold") return this.bloomThreshold;
+            if (name == "contrast") return this.contrast;
+            if (name == "saturation") return this.saturation;
+            if (name == "vignette") return this.vignette;
+            if (name == "scattering") return this.scattering;
+            if (name == "shafts") return this.shafts;
+            if (name == "shaftRange") return this.shaftRange;
+            if (name == "underwaterExposure") return this.underwaterExposure;
+            if (name == "renderScale") return this.renderScale;
             throw new Error("OceanParams.valueOf: unknown control '" + name + "'");
         }
 
@@ -222,6 +329,17 @@ package panel
             if (name == "foamScale") { this.foamScale = nonNeg(v); return; }
             if (name == "glint") { this.glint = clamp01(v); return; }
             if (name == "exposure") { this.exposure = Math.max(0.01, v); return; }
+            if (name == "keyValue") { this.keyValue = Math.max(0.005, v); return; }
+            if (name == "bloomStrength") { this.bloomStrength = nonNeg(v); return; }
+            if (name == "bloomThreshold") { this.bloomThreshold = nonNeg(v); return; }
+            if (name == "contrast") { this.contrast = Math.max(0.1, v); return; }
+            if (name == "saturation") { this.saturation = nonNeg(v); return; }
+            if (name == "vignette") { this.vignette = clamp01(v); return; }
+            if (name == "scattering") { this.scattering = nonNeg(v); return; }
+            if (name == "shafts") { this.shafts = nonNeg(v); return; }
+            if (name == "shaftRange") { this.shaftRange = Math.max(1.0, v); return; }
+            if (name == "underwaterExposure") { this.underwaterExposure = Math.max(0.01, v); return; }
+            if (name == "renderScale") { this.renderScale = Math.min(2.0, Math.max(0.5, v)); return; }
             throw new Error("OceanParams.setValue: unknown control '" + name + "'");
         }
 
@@ -237,12 +355,19 @@ package panel
             var e:Array = PRESETS[k];
             var a:Array = e[1];
             var s:Array = e[2];
+            var t:Array = e[3];
             this.absorbBase[0] = a[0];
             this.absorbBase[1] = a[1];
             this.absorbBase[2] = a[2];
             this.scatter[0] = s[0];
             this.scatter[1] = s[1];
             this.scatter[2] = s[2];
+            this.foamTint[0] = t[0];
+            this.foamTint[1] = t[1];
+            this.foamTint[2] = t[2];
+            // turbidity is part of the LOOK, not a separate switch: the reference's
+            // preset handler sets `underwater.params.scattering` with the colours.
+            this.scattering = e[4];
             this.refreshAbsorption();
         }
 
@@ -282,6 +407,18 @@ package panel
             this.foamScale = d.foamScale;
             this.glint = d.glint;
             this.exposure = d.exposure;
+            this.autoExposure = d.autoExposure;
+            this.keyValue = d.keyValue;
+            this.bloomStrength = d.bloomStrength;
+            this.bloomThreshold = d.bloomThreshold;
+            this.contrast = d.contrast;
+            this.saturation = d.saturation;
+            this.vignette = d.vignette;
+            this.scattering = d.scattering;
+            this.shafts = d.shafts;
+            this.shaftRange = d.shaftRange;
+            this.underwaterExposure = d.underwaterExposure;
+            this.renderScale = d.renderScale;
             this.reflections = d.reflections;
             this.view = d.view;
             this.absorbBase[0] = d.absorbBase[0];
@@ -290,6 +427,9 @@ package panel
             this.scatter[0] = d.scatter[0];
             this.scatter[1] = d.scatter[1];
             this.scatter[2] = d.scatter[2];
+            this.foamTint[0] = d.foamTint[0];
+            this.foamTint[1] = d.foamTint[1];
+            this.foamTint[2] = d.foamTint[2];
             this.refreshAbsorption();
         }
 
@@ -306,6 +446,12 @@ package panel
                 " | water=" + PRESETS[this.preset][0] + " clarity=" + r2(this.clarity) +
                 " rough=" + r3(this.roughness) + " glint=" + r2(this.glint) +
                 " | exposure=" + r2(this.exposure) +
+                " auto=" + this.autoExposure + " key=" + r2(this.keyValue) +
+                " bloom=" + r3(this.bloomStrength) + "@" + r2(this.bloomThreshold) +
+                " contrast=" + r2(this.contrast) + " saturation=" + r2(this.saturation) +
+                " vignette=" + r2(this.vignette) +
+                " | turbidity=" + r3(this.scattering) + " shafts=" + r2(this.shafts) +
+                " scale=" + r2(this.renderScale) +
                 " reflections=" + this.reflections +
                 " view=" + VIEWS[this.view];
         }

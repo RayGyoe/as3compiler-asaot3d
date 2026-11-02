@@ -4351,18 +4351,100 @@ OceanPanelView ──► OceanParams ──► applyView()/applyParams() ──�
   显式高度同时成为 `ScrollViewWidget.measure` 的逐子高度，长分区才会「滚动」而不是被压扁。
   同理，面板根用 `alignItems: "flex-end"` 靠右，**不要**用 `justifyContent`：asaotui 的
   `Style.resolve` 会沿祖先链继承未设置的属性，`justifyContent` 会漏进 select 的下拉行。
-- **验收**：`probes/panel-params-m35/` **66 项 ALL PASS**（默认值 11 / 0..1 映射 7 /
-  21 个控件的按名双向映射与八条夹取 30 / 水色 8 / reset 4 / describe 4 / 未知名抛错 2）。
-  它能在无 GPU 的情况下钉住模型，但钉不住面板：**面板本身只有肉眼验收**（真实鼠标事件
-  打开下拉、拖滑块、勾掉反射、Reset、折叠/展开），这正是「自动 PASS ≠ 可用」的那一类。
+- **验收**：`probes/panel-params-m35/` **88 项 ALL PASS**（默认值 14 / 0..1 映射 7 /
+  31 个控件的按名双向映射 32 / 十二条夹取 12 / 渲染档位 5 / 水色 8 / reset 4 /
+  describe 4 / 未知名抛错 2）。**控件表的每一个名字都必须在 `valueOf`/`setValue` 里有分支**：
+  本轮加 `vignette` 行时表里有、访问器里没有，探针的「按名往返」当场抛
+  `unknown control 'vignette'`——这正是它存在的理由。它能在无 GPU 的情况下钉住模型，但钉不住面板：**面板本身
+  只有肉眼验收**（真实鼠标事件打开下拉、拖滑块、勾掉反射、Reset、折叠/展开），这正是
+  「自动 PASS ≠ 可用」的那一类。
 
 ### 39.16 本轮新增规则（R88–R89）
 
-- **R88**：**面板不能假装拥有参照里兑现不了的能力**。移植参照 GUI 时先过一遍着色器：
-  本移植的 `water.frag` 没有 turbidity、没有岸线波浪、后期只有 exposure（没有
-  bloom/contrast/saturation/auto-exposure），那么这些控件就不出现在面板上；缺的项写进
-  文档，而不是做成「拖了没反应」的假滑块。
+- **R88**（§39.17 修订）：**控件只有两种合法状态——真生效，或者根本不在面板上**。原先的
+  措辞是「着色器没有对应物就别出现」，但那是**当时**的结论：那一轮的真实缺口是「对照着的
+  pass 里没有这条链路」，而不是「这件事做不到」。判据因此收紧为两条：①控件要接进**真正
+  消费这个值的 pass**——`uUnder` 曾经在 `drawShafts()` 里写死成 `[0.055, 0.9, 42, 0]`，
+  于是浊度滑块拖到底画面都不动，这跟假滑块是同一个病，只是假在 app 里而不是面板里；
+  ②链路不存在时先看**能不能补出链路**（本轮补出了线性 HDR → bloom → ACES → grade，
+  所以 bloom/contrast/saturation/auto-exposure 从「没有」变成「有」），补不出的才落文档。
+  退货判据：任何控件在**帧边界**（`applyParams()` 之后）读到的 uniform 值必须随模型变，
+  否则删除该控件而不是留着。
 - **R89**：**统计归宿主、计数归 demo**。HUD 的建立/刷新/切换由 `Stage3DApp` 提供
   （`showStats()` 关闭），draw/frame 计数由 demo 用 `frameDrawCalls()`/`frameTriangles()`
   记账；`renderer` 自报值只在「整帧只走 `renderer.render()`」的 demo 里可以直接用。
+
+### 39.17 M34 后期链路落地：把「做不了」换成「补链路」（D215–D218、R90–R92，2026-11-03）
+
+§39.16 的 R88 当时把 bloom/contrast/saturation/auto-exposure、浊度、质量档一起判成
+「移植版着色器没有对应物」。复核下来这条判据用错了方向：**缺的是链路，不是能力**。
+于是本轮补齐四件事，判据也一起改掉（见 R88 修订）。
+
+- **D215 后期拆成两段：`composite` 只到线性 HDR，`grade` 才落 drawable**。
+  `composite.frag` 现在把「不透明 + 水面 + spray + 光柱」合成成**线性 HDR** 写进 `_hdr`；
+  新 `grade.frag` 读 `_hdr`，顺序是 **曝光 → 加 bloom → ACES → contrast → saturation →
+  vignette → sRGB OETF**。为什么必须拆：bloom 与自动曝光都要在 tone map **之前**的线性值上
+  算（tone map 之后的暗部被压过、亮部已裁），把它们塞进原来那个「合成即上屏」的 pass 里
+  就只能拿到已编码的值。这条拆分的代价是整条链的**行序约定**必须重新对一遍：`composite`
+  写 `_hdr` 用 `vUV`、`grade` 读 `_hdr` 也用 `vUV`、`grade` 写 drawable **不翻转**——
+  与 HEAD（`composite` 直接上屏且带一次翻转）逐像素比对 mean abs diff **0.01**，是零差异；
+  之前把「唯一一次翻转」挪进 `grade` 的版本是 **99.84 / max 240**（整幅上下颠倒）。
+  结论写进注释：`target → target` 与 `target → drawable` 在原生通道里行序一致，翻转只在
+  「另一条通往 drawable 的路径」上才需要，而这条链已经没有了。
+- **D216 自动曝光是 meter → adapt → grade 三级，不是一次除法**。
+  `meter.frag` 把 `_hdr` 降采样成 32×32 的 `log2` 亮度网格；`adapt.frag` 用 1×1 浮点
+  **乒乓**目标做指数趋近（`k = 1 - exp(-dt/tau)`，首帧 `k = 1` 直接取目标，避免读到未初始化
+  的 `prev`）；`grade.frag` 用 `exposure = key / 2^state`，再夹到 `[minExposure, maxExposure]`。
+  水下额外乘 `underwaterExposure`（缓动趋近，出水回 1）。**默认不发自动曝光**（`autoExposure
+  = false`，`exposure = 0.45` 与 HEAD 一致）：实测本场景下 key 0.18 会把水下段测成近黑、
+  key 0.30 又把水下 in-scatter 测到发白——自动曝光对「一半是亮海面、一半是暗水体」的画面
+  天然两难，它需要自己一轮针对水下的调校（见本节末「未做」），而**默认画面不允许是实验品**。
+  复选框保留，功能是真的（水面上工作正常、逐帧跟随）。
+- **D217 质量档是六个档位的 select，不是滑块；且只有屏幕尺寸的目标参与重建**。
+  `OceanParams.SCALES = [0.5, 0.75, 1, 1.25, 1.5, 2]`，原生通道**没有 texture dispose**，
+  连续滑块会把旧目标一层层漏掉，档位化把漏的量封在「用户点了几次」。架构上必须把目标
+  分成两组——`makeFixedTargets()`（FFT 级联、大气 LUT、caustics、lens、meter、adapt、
+  反射关闭用的 1×1 黑）与 `makeScreenTargets()`（反射、不透明、水面、spray、光柱、`_hdr`、
+  bloom 金字塔）；`applyRenderScale()` 只调后者。**这条是被自检逼出来的**：一开始一把
+  `makeTargets()` 全建，`renderScale = 0.5` 那一下直接把 FFT 级联与大气 LUT 清成新的
+  空目标，于是 `FAIL four-cascade FFT gives a varying surface` / `FAIL atmosphere LUT bake
+  produced radiance` / `FAIL the surface pass covered the lower frame` 三条同时红。
+  2× 档实测 `2304x1440 internal (drawable 960x600)`，`grade.frag` 的 `uSuper` 打开后做
+  四抽样箱式滤波——这就是美术上等价于 MSAA 的**超采样**（真正的 MSAA 在当前离屏链里没有
+  插入点：Metal 的 MSAA 目标要在 pipeline 的可写附件上，而我们是「一张张单独 pass 的
+  半浮点目标」）。
+- **D218 浊度属于光柱 march，不属于合成**。`uUnder` 原本在 `drawShafts()` 里写死成
+  `[0.055, 0.9, 42.0, 0]`，所以「浊度」这个模型字段在画面上是死的；改成
+  `[_params.scattering, _params.shafts, _params.shaftRange, 0]` 之后，浊度 0.055 → 0.35
+  让水下自检均值从 **0.0407 掉到 0.0044**（光柱被吃掉），肉眼也确实是「更浑、god ray 更弱」。
+  另外 **preset 会盖掉字段默认值**：`OceanPanelView` 构造时 `setPreset(preset)`，所以
+  `PRESETS[0]` 的浊度才是首帧的真实值——字段默认必须与 `PRESETS[0]` 对齐（否则「头less
+  直接用模型」与「面板打开后」两个默认值不一样，探针会抓出来）。
+
+**本轮明确未做**（写在这里而不是留空想）：
+
+- **水下段的自动曝光调校**。`autoExposure` 的算术是正确的（水面上逐帧跟随、突变不过冲），
+  但本场景「上半天光 + 下半水体」的直方图让单键值测光两头不讨好：key 0.18 → 水下近黑，
+  key 0.30 → 水下 in-scatter 发白。参照页面靠 AgX 的 toe/shoulder 消化这段动态范围，我们要么
+  换 tone map，要么给水下单独一条测光通道（按 `underwater` 切换 key/tau）。**两个方案都要重做
+  一遍与参照的对照**，不是本轮的收尾项。
+- **岸线波浪**（参照 `water/shoreMap.js`：岸距 SDF、行进时间图、浅水增陡 shoaling、岸边泡沫）。
+  这是本轮唯一还缺的功能段，需要一张烘焙的岸距图和一个新的水面分支，规模与 D215 同级。
+
+### 39.18 本轮新增规则（R90–R92）
+
+- **R90**：**后期先问「这个值编码过没有」**。exposure/bloom/tone map 必须在**线性 HDR**
+  上做，写进 drawable 的那一步才做 OETF；把 exposure 放在 sRGB 编码之后等于白调（暗部已经
+  被 `pow(x, 1/2.2)` 抬起来，乘完再裁）。所以任何新增后期都先回答：它消费的是 `_hdr` 还是
+  drawable？答不出来就别加。
+- **R91**：**没被写过的 render target 不能采样，`* 0.0` 不是保险**。新建的半浮点目标内容是
+  NaN/garbage，`NaN * 0.0` 仍是 NaN，一个「强度为 0 时乘 0」的写法会把整幅画面毒成黑。
+  本轮的判据来自三段调试带：`hdr` 非黑、`aces(hdr)` 非黑、`(hdr + bloom*0)` 全黑 ⇒ 问题在
+  bloom 那个空目标。修法是**守卫采样**（`uBloomStrength > 0.0 ? texture(...).rgb : vec3(0)`），
+  而不是 `Context3D.clear()`——后者是延迟命令，能不能在第一个消费 pass 之前生效要看队列，
+  守卫则与队列无关。
+- **R92**：**尺寸可变的后期目标必须与烘焙目标分开建**。任何「按屏幕尺寸分配」的目标集合都要
+  能被单独重建，且重建入口只碰这一组；把 FFT 级联/LUT 混在一起重建，等于每次改分辨率都把
+  累积状态清空（本轮实测三条自检立刻红）。同理，凡是**由分辨率推导**的量（相机 aspect、
+  texel size、超采样开关）都要从 `_rw/_rh` 读，不能从 `stage.stageWidth` 读。
 
