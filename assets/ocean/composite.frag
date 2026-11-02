@@ -17,6 +17,7 @@ uniform vec4 uUnder;           // scattering (1/m), shaft strength, -, -
 uniform float uFull;           // 1: the whole near plane is submerged
 uniform float uActive;         // 1: the lens map is valid this frame
 uniform float uExposure;
+uniform float uDebug;            // mirrors water.frag's channel selector for diagnosis
 in vec2 vUV;
 out vec4 fragColor;
 
@@ -63,6 +64,16 @@ void main() {
   }
 
   col += texture(uSpray, uv).rgb;
+
+  if (uDebug > 0.5) { fragColor = vec4(isWater ? w.rgb : o.rgb, 1.0); return; }
+
+  // White balance and a little saturation before the tone map. At a 3.5 degree sun the
+  // reference's frame carries R > G > B everywhere (its water averages a red/blue of
+  // about 2.0); this chain lands at about 1.0 without a grade, because the atmosphere
+  // bake is physically neutral rather than camera-neutral. The post section of the
+  // reference has the same job one step earlier.
+  col *= vec3(1.10, 1.0, 0.86);
+  col = mix(vec3(dot(col, vec3(0.2126, 0.7152, 0.0722))), col, 1.12);
 
   // exposure, filmic, slight vignette -- the reference leaves this to three's tone map
   col = aces(col * uExposure);

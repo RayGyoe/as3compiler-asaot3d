@@ -7,6 +7,7 @@ uniform vec3 uSunDir;
 uniform vec3 uSunColor;
 uniform float uSunIllum;
 uniform float uCloudCoverage;
+uniform float uAlpha;   // opaque pass: 1e4 (far depth); reflection pass: 0 (no coverage)
 in vec3 vDir;
 out vec4 fragColor;
 
@@ -43,7 +44,7 @@ void main() {
     // the bottom of the frame never shows a bright band past the last ocean ring.
     float F = 0.02 + 0.98 * pow(1.0 + d.y, 5.0);
     vec3 body = WATER * (uSunColor * max(uSunDir.y, 0.0) + up);
-    fragColor = vec4(mix(body, skyView(vec3(d.x, -d.y, d.z), uSunDir), F), 1e4);
+    fragColor = vec4(mix(body, skyView(vec3(d.x, -d.y, d.z), uSunDir), F), uAlpha);
     return;
   }
 
@@ -81,5 +82,5 @@ void main() {
   // .a is the opaque pass's linear view depth (see terrain.frag). The sky has none,
   // and 1e4 m is far past any geometric depth, so it neither occludes the water nor
   // absorbs anything under it.
-  fragColor = vec4(col, 1e4);
+  fragColor = vec4(col, uAlpha);
 }

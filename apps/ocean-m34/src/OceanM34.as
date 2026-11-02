@@ -51,6 +51,9 @@ package
 {
     import flash.desktop.NativeApplication;
     import flash.display.BitmapData;
+    import flash.filesystem.File;
+    import flash.filesystem.FileMode;
+    import flash.filesystem.FileStream;
     import flash.geom.Matrix;
     import flash.geom.Rectangle;
     import flash.utils.ByteArray;
@@ -90,8 +93,8 @@ package
         private static const NEAR:Number = 0.5;
         private static const FAR:Number = 12000.0;
 
-        private static const RW:int = 768;
-        private static const RH:int = 480;
+        private static const RW:int = 1152;
+        private static const RH:int = 720;
 
         private static const TRANS_W:int = 256;
         private static const TRANS_H:int = 64;
@@ -106,9 +109,20 @@ package
         private static const SPRAY_COUNT:int = 2600;
         private static const CHECK_ENABLED:Boolean = true;
 
+        // Visual diagnosis switch: 0 = shaded, 1..8 = one water term per build (see the
+        // tail of assets/ocean/water.frag). Kept as a constant so a probe run is exactly
+        // reproducible; nothing in a shipped frame reads it.
+        private static const DEBUG:int = 0;
+
+        // Write the composed frame to temp/m34-frame.ppm once the checks are in. A
+        // window capture reads the window server's last snapshot, which goes stale for
+        // this demo (the Metal layer presents without an AppKit redraw), so the only
+        // frame worth judging is the one read back out of _final.
+        private static const DUMP_FRAME:Boolean = true;
+
         // Absorption in 1/m. Red dies an order of magnitude faster than blue, which is
         // the whole difference between blue water and green water.
-        private static const ABSORB:Array = [0.42, 0.075, 0.048];
+        private static const ABSORB:Array = [0.17, 0.055, 0.038];
         private static const SCATTER:Array = [0.010, 0.062, 0.085];
         // Reference units: radiance is relative to the sun's illuminance outside the
         // atmosphere, and the sun's own colour at sea level is its transmittance times
@@ -118,12 +132,16 @@ package
         // the sun's disc 16x dark.
         private static const SUN_INTENSITY:Number = 9.0;
         private static const SUN_ILLUM:Number = Math.PI * SUN_INTENSITY;   // sky LUT scale
-        private static const SUNCOL:Array = [6.077, 4.062, 2.087];
+        private static const SUNCOL:Array = [3.186, 1.177, 0.191];
 
-        // 11 degrees above the horizon: the sky LUT is in its interesting range and the
-        // water gets a long specular road instead of a glare disc.
-        private static const SUN_ELEV:Number = 0.19;
-        private static const SUN_AZIM:Number = 2.35;
+        // 3.5 degrees above the horizon: the reference's "Golden hour" default, and the
+        // reason its water is a long amber road rather than a glare disc. SUNCOL is the
+        // same transmittance integral times 9, evaluated at this elevation (the CPU mirror
+        // of the LUT in Ultra-Water src/scene/atmosphere.js): at 11 degrees it is
+        // [6.077, 4.062, 2.087], and the ten degrees of path closer to the horizon is
+        // most of the difference between daylight blue and this.
+        private static const SUN_ELEV:Number = 0.06109;
+        private static const SUN_AZIM:Number = 3.5779;   // 205 deg, the reference's azimuth
 
         // Sea state, from Ultra-Water's OceanSim defaults: two JONSWAP trains (a 9 m/s
         // wind sea over a 120 km fetch and a 7 m/s swell over 900 km), 3.3 peak
@@ -219,6 +237,9 @@ package
 
         private var _time:Number = 0;
         private var _frames:int = 0;
+        private var _dbgDescribed:Boolean = false;
+        private var _dumped:Boolean = false;
+        private var _dbgWaterDescribed:Boolean = false;
         private var _belowFrames:int = 0;
         private var _checked:Boolean = false;
         private var _checkedBelow:Boolean = false;
@@ -295,12 +316,17 @@ package
 
             _transLut = _native["createTexture"](TRANS_W, TRANS_H, Context3DTextureFormat.RGBA_HALF_FLOAT, true, false);
             _msLut = _native["createTexture"](MS_N, MS_N, Context3DTextureFormat.RGBA_HALF_FLOAT, true, false);
-            _skyLut = _native["createTexture"](SKY_W, SKY_H, Context3DTextureFormat.RGBA_HALF_FLOAT, true, false);
+            // mipmapped: the water looks the sky up at a roughness-driven LOD (a sharp
+            // lookup turns every steep facet into a streak of cloud edge), and a LOD past
+            // the last level of an unmipmapped target is black, not blurred.
+            _skyLut = _native["createTexture"](SKY_W, SKY_H, Context3DTextureFormat.RGBA_HALF_FLOAT, true, true);
 
             _causticNear = _native["createTexture"](CAUSTIC_NEAR, CAUSTIC_NEAR, "rgba32f", true, true);
             _causticDeep = _native["createTexture"](CAUSTIC_DEEP, CAUSTIC_DEEP, "rgba32f", true, true);
 
-            _refl = _native["createTexture"](RW / 2, RH / 2, Context3DTextureFormat.RGBA_HALF_FLOAT, true, false);
+            // mipmapped: the water samples this at a roughness-driven LOD, and a LOD past
+            // the last level of an unmipmapped target is black, not blurred.
+            _refl = _native["createTexture"](RW / 2, RH / 2, Context3DTextureFormat.RGBA_HALF_FLOAT, true, true);
             _reflDepth = _native["createDepthTexture"](RW / 2, RH / 2, "depth32f");
             // The composite writes here, not straight to the back buffer: reading a
             // Metal drawable back with drawToBitmapData any time before present gave
@@ -354,12 +380,12 @@ package
             _mCaustic.samplers = { uSlope: "repeat" };
 
             // --- terrain / water / spray ---
-            _mTerrain = this.mat(OceanM34Assets.program("terrain_frag", ["caustics_lookup"]),
+            _mTerrain = this.mat(OceanM34Assets.program("terrain_frag", ["atmo_core", "atmo_sky", "caustics_lookup"]),
                                  OceanM34Assets.program("terrain_vert", null));
             _mTerrain.side = Material.DoubleSide;
             _mTerrain.samplers = { uCaustics: "repeat", uCausticsDeep: "repeat" };
 
-            _mWater = this.mat(OceanM34Assets.program("water_frag", null),
+            _mWater = this.mat(OceanM34Assets.program("water_frag", ["atmo_core", "atmo_sky"]),
                                OceanM34Assets.program("water_vert", null));
             // Every cascade atlas tiles, so its sampler must repeat; uOpaque and
             // uReflection are screen-sized and clamp. Both stages declare the cascades
@@ -410,6 +436,7 @@ package
             _mSkyLut.setUniformValue("uSunMu", _sunY);
             _mSkyLut.setUniformValue("uSunIllum", SUN_ILLUM);
             this.pass(_mSkyLut, [_skyLut], null);
+            _native["generateMipmaps"](_skyLut);
 
             _mSky.setUniformValue("uSunDir", [_sunX, _sunY, _sunZ]);
             _mSky.setUniformValue("uSunColor", SUNCOL);
@@ -605,7 +632,9 @@ package
             if (phase < 12.0)
             {
                 dist = 150.0 - phase * 3.0;
-                height = 9.0 + Math.sin(phase * 0.6) * 1.2;
+                // Reference eye height: 5 m is what makes the horizon sit low in frame
+                // and the near water occupy the bottom half.
+                height = 5.0 + Math.sin(phase * 0.6) * 0.5;
             }
             else
             {
@@ -613,10 +642,14 @@ package
                 height = -4.5 - Math.sin((phase - 12.0) * 0.35) * 1.5;
             }
             _underwater = height < 0.0;
-            var a:Number = 0.4 + phase * 0.03;
+            // Orbit just OFF the sun's own bearing, looking back towards the island: the
+            // reference's golden-hour camera does the same, and it is why the water shows
+            // a glitter road. Orbiting away from the sun gives a dark, mirror-like sea
+            // with no highlights at all, however correct the shading maths is.
+            var a:Number = SUN_AZIM + Math.PI + 0.04 + Math.sin(phase * 0.09) * 0.05;
             _camera.position.set(Math.sin(a) * dist, height, Math.cos(a) * dist);
             if (_underwater) _camera.lookAt(0, 8.0, 0);
-            else _camera.lookAt(0, 2.0, 0);
+            else _camera.lookAt(0, 5.2, 0);   // near level: horizon just above centre
             _camera.updateMatrixWorld(true);
             _camera.updateMatrixWorldInverse();
         }
@@ -643,10 +676,15 @@ package
             _mirror.projectionMatrixInverse.copy(_camera.projectionMatrixInverse);
 
             _native["setRenderTargets"]([_refl], _reflDepth);
-            _context.clear(0, 0, 0, 1, 1, 0, 7);
+            // Premultiplied, alpha = coverage: the water samples this blurred, and a mip
+            // of black would drag the reflection to black instead of to the sky.
+            _context.clear(0, 0, 0, 0, 1, 0, 7);
+            _mSky.setUniformValue("uAlpha", 0.0);
             _mTerrain.setUniformValue("uReflPass", 1.0);
             _nr.render(_reflScene, _mirror);
+            _mSky.setUniformValue("uAlpha", 1e4);
             _mTerrain.setUniformValue("uReflPass", 0.0);
+            _native["generateMipmaps"](_refl);
 
         }
 
@@ -686,21 +724,30 @@ package
             m.setUniformValue("uOpaque", _opaque);
             m.setUniformValue("uReflection", _refl);
             m.setUniformValue("uLength", [P0, P1, P2, P3]);
-            m.setUniformValue("uOptics", [0.055, 0.035, 0.045, 0.0]);
-            m.setUniformValue("uFoam", [0.62, 1.9, 0.85, 0.0]);
+            // Roughness/refraction/distortion/fog straight from OceanSurface.js: 0.02 is
+            // the reference's base roughness (0.055 was smooth enough to hide the sun's
+            // road), and 1/18000 is its aerial-perspective density.
+            m.setUniformValue("uOptics", [0.02, 0.06, 0.04, 1.0 / 18000.0]);
+            m.setUniformValue("uFoam", [0.05, 1.3, 0.35, 0.85]);
+            m.setUniformValue("uSSS", [1.6, 0.06, 0.05, 0.0]);
+            m.setUniformValue("uSkyView", _skyLut);
+            m.setUniformValue("uTime", _time);
                     m.setUniformValue("uSunDir", [_sunX, _sunY, _sunZ]);
             m.setUniformValue("uSunColor", SUNCOL);
             m.setUniformValue("uAbsorption", ABSORB);
             m.setUniformValue("uScatterColor", SCATTER);
+            m.setUniformValue("uSkyView", _skyLut);
             m.setUniformValue("uSkyAmbient", [0.32, 0.42, 0.52]);
-            m.setUniformValue("uGlint", 1.0);
+            m.setUniformValue("uGlint", 0.6);
                 var f:Vector.<Number> = _camera.matrixWorld.elements;
             m.setUniformValue("uCamForward", [-f[8], -f[9], -f[10]]);
-            m.setUniformValue("uCellStep", 6.283185307179586 / 192.0);
+            m.setUniformValue("uDebug", DEBUG);
+            m.setUniformValue("uCellStep", 6.283185307179586 / 320.0);
             m.setUniformValue("uWind", WIND_SPEED);
 
             // clear alpha 1 = "no water here": the tag the composite keys on. 0 is the
             // underside and 2 the top, so a cleared pixel cannot be read as a surface.
+            if (!_dbgWaterDescribed) { _dbgWaterDescribed = true; logLine("WATER PROGRAM:\n" + _nr.describeProgram(m)); }
             _native["setRenderTargets"]([_water], null);
             _context.clear(0, 0, 0, 1, 1, 0, 7);
             _context.setCulling("frontAndBack");   // gl_FrontFacing must be able to differ
@@ -777,8 +824,10 @@ package
             m.setUniformValue("uScatterColor", SCATTER);
             m.setUniformValue("uSunColor", SUNCOL);
             m.setUniformValue("uUnder", [0.055, 0.9, 42.0, 0.0]);
-                m.setUniformValue("uExposure", 1.35);
+            m.setUniformValue("uExposure", 0.45);
+            m.setUniformValue("uDebug", DEBUG);
 
+            if (!_dbgDescribed) { _dbgDescribed = true; logLine("COMPOSITE PROGRAM:\n" + _nr.describeProgram(m)); }
             this.pass(m, [_final], null);
             _mPresent.setUniformValue("uSrc", _final);
             _native["setBackBuffer"]();
@@ -786,6 +835,56 @@ package
             _context.setCulling("frontAndBack");
             _nr.drawNative(_quad, _mPresent);
             _context.setCulling("back");
+            if (DUMP_FRAME && _frames == 30 && !_dumped) { _dumped = true; this.dumpFrame("../../temp/m34-frame.ppm"); }
+        }
+
+        // Copy _final into the back buffer and write it as a binary PPM. Development
+        // only: it allocates a full-resolution bitmap and touches the filesystem.
+        private function dumpFrame(path:String):void
+        {
+            _mPresent.setUniformValue("uSrc", _final);
+            _native["setBackBuffer"]();
+            _context.clear(0, 0, 0, 1);
+            _context.setCulling("frontAndBack");
+            _nr.drawNative(_quad, _mPresent);
+            _context.setCulling("back");
+
+            var w:int = stage.stageWidth;
+            var h:int = stage.stageHeight;
+            var bmd:BitmapData = new BitmapData(w, h, false, 0x000000);
+            _context.drawToBitmapData(bmd);
+
+            // getPixel, not getPixels: the bulk accessor is not implemented on this
+            // runtime (#2004). Full resolution: half-size turned antialiasing artefacts
+            // into "detail" and hid exactly what the dump is for.
+            var dw:int = w;
+            var dh:int = h;
+            var out:ByteArray = new ByteArray();
+            out.writeUTFBytes("P6\n" + dw + " " + dh + "\n255\n");
+            var x:int, y:int;
+            for (y = 0; y < dh; y++)
+            {
+                for (x = 0; x < dw; x++)
+                {
+                    var c:int = bmd.getPixel(x, y);
+                    out.writeByte((c >> 16) & 0xFF);
+                    out.writeByte((c >> 8) & 0xFF);
+                    out.writeByte(c & 0xFF);
+                }
+            }
+            try
+            {
+                var f:File = File.applicationDirectory.resolvePath(path);
+                var fs:FileStream = new FileStream();
+                fs.open(f, FileMode.WRITE);
+                fs.writeBytes(out);
+                fs.close();
+            }
+            catch (e:Error)
+            {
+                logLine("dbg: write failed " + e.errorID + " " + e.message);
+            }
+            logLine("ocean-m34 dumped " + w + "x" + h + " to " + path);
         }
 
         // Every offscreen draw goes through here: bind the target(s), draw the quad.
@@ -946,8 +1045,13 @@ package
         // cell so the shader can derive its own LOD from its radius.
         private function polarMesh():BufferGeometry
         {
-            var rings:int = 170;
-            var sectors:int = 192;
+            // Ring spacing is (r1/r0)^(1/rings) - 1 ~ 3.4% and the angular step is
+            // 2pi/sectors: the reference runs 384 sectors and a 1.64% radial step, and at
+            // these numbers the mid-field grid was coarser than the 12 m cascade, so the
+            // surface kept its fine slope detail in the shading while the geometry under
+            // it stayed flat -- which reads as sparkle with no swell.
+            var rings:int = 240;
+            var sectors:int = 320;
             var r0:Number = 2.0;
             var r1:Number = 6000.0;
             var pos:Vector.<Number> = new Vector.<Number>((rings + 1) * sectors * 3, false);
@@ -1153,9 +1257,9 @@ package
             _mTerrain.setUniformValue("uCausticsDeep", _causticDeep);
             _mTerrain.setUniformValue("uSunDir", [_sunX, _sunY, _sunZ]);
             _mTerrain.setUniformValue("uSunColor", SUNCOL);
-            _mTerrain.setUniformValue("uSkyAmbient", [0.30, 0.40, 0.50]);
-            _mTerrain.setUniformValue("uSand", [0.52, 0.46, 0.34]);
-            _mTerrain.setUniformValue("uRock", [0.20, 0.21, 0.19]);
+            _mTerrain.setUniformValue("uSkyView", _skyLut);
+            _mTerrain.setUniformValue("uSand", [0.80, 0.64, 0.44]);
+            _mTerrain.setUniformValue("uRock", [0.52, 0.47, 0.38]);   // the lagoon floor is sand all the way down; a dark rock albedo put black patches under an otherwise uniform sea
             _mTerrain.setUniformValue("uCausticStrength", 1.0);
             _mTerrain.setUniformValue("uReflPass", 0.0);
             _terrainMain = new Mesh(tm, _mTerrain);
@@ -1176,18 +1280,22 @@ package
         // +12..+20 m, which is what puts a silhouette on the horizon for the reflection.
         private function seabedH(x:Number, z:Number):Number
         {
-            // Deep enough that the water column reads as ocean: at 7 m the sea floor's
-            // own texture came through the surface almost unattenuated and the water
-            // looked like a shallow reef rather than open sea.
-            var h:Number = -26.0
-                + 1.4 * Math.sin(x * 0.021) * Math.cos(z * 0.017)
-                + 0.7 * Math.sin((x + z) * 0.043)
-                + 0.35 * Math.sin(x * 0.11 + 1.3) * Math.cos(z * 0.09);
-            // Peaks are measured from the -26 m floor, so the island amplitudes carry
-            // the extra 19 m: 21/15/12 above the old floor is 40/34/31 here.
-            h = h + this.island(x, z, -230.0, -180.0, 120.0, 40.0);
-            h = h + this.island(x, z, 260.0, -320.0, 90.0, 34.0);
-            h = h + this.island(x, z, 60.0, 330.0, 70.0, 31.0);
+            // The sea floor is a shallow lagoon that deepens with distance: near the
+            // camera the sand sits ~7 m down, so the light that comes back up through the
+            // surface still carries its colour (Beer-Lambert at 7 m keeps green and blue
+            // and kills red, which is where the teal in the troughs comes from). Past a
+            // kilometre it is deep enough to read as open sea. A flat deep floor was what
+            // made the near water a black slab.
+            var r:Number = Math.sqrt(x * x + z * z);
+            var h:Number = -3.2 - 0.018 * r
+                + 1.0 * Math.sin(x * 0.021) * Math.cos(z * 0.017)
+                + 0.5 * Math.sin((x + z) * 0.043)
+                + 0.28 * Math.sin(x * 0.11 + 1.3) * Math.cos(z * 0.09);
+            // Peaks stay at roughly +12/+6/+4 m so the horizon still has a silhouette;
+            // the amplitudes are measured from the lagoon floor under each island.
+            h = h + this.island(x, z, -230.0, -180.0, 120.0, 24.0);
+            h = h + this.island(x, z, 260.0, -320.0, 90.0, 19.0);
+            h = h + this.island(x, z, 60.0, 330.0, 70.0, 16.0);
             return h;
         }
 

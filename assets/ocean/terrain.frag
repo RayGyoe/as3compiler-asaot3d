@@ -6,7 +6,8 @@
 // the sun do not give the same pattern.
 uniform vec3 uSunDir;
 uniform vec3 uSunColor;
-uniform vec3 uSkyAmbient;
+uniform vec3 uSkyAmbient;   // kept for the ambient of the reflection pass, where the
+                            // sky LUT is not bound (the mirror only needs albedo)
 uniform vec3 uAbsorption;
 uniform vec3 uScatterColor;
 uniform vec3 uSand;
@@ -30,7 +31,11 @@ void main() {
   vec3 albedo = mix(uRock, uSand, flat_);
 
   float NoL = max(dot(N, uSunDir), 0.0);
-  vec3 col = albedo * (uSkyAmbient + uSunColor * NoL);
+  // Ambient from the baked sky at its coarsest level -- that level IS the sky's
+  // irradiance. A constant 0.4 read as a night sea at sunset, when the sky the sand
+  // actually sees is an order of magnitude brighter than its zenith radiance.
+  vec3 ambient = skyViewLod(N, uSunDir, 5.0) * vec3(2.75, 2.5, 2.1);   // radiance -> irradiance
+  vec3 col = albedo * (ambient + uSunColor * NoL);
 
   if (uCausticStrength > 0.0 && depth > 0.0) {
     // where the flat-water refracted sun ray through this point crosses the surface
@@ -49,5 +54,5 @@ void main() {
   // Absorption of the water column is applied in the composite, not here: the camera
   // can straddle the surface, so "how much water is between me and this pixel" is a
   // per-pixel question that only the composite's lens map can answer.
-  fragColor = vec4(col, vViewZ);
+  fragColor = vec4(col, uReflPass > 0.5 ? 1.0 : vViewZ);
 }

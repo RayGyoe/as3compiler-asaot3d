@@ -7,6 +7,11 @@
 // of aliasing the 2.1 m cascade into noise. +1 LOD bias because box-filtered mips still
 // leak a little past Nyquist.
 layout(location = 0) in vec3 aPos;
+// The fragment stage pulls in atmo_core.glsl, which declares `precision highp sampler2D`.
+// GLSL requires the precision of a shared sampler uniform to MATCH between stages, and a
+// mismatch fails the whole program at link time -- the pass then draws nothing, silently,
+// which reads on screen as "the sea is missing" rather than as a shader error.
+precision highp sampler2D;
 uniform vec3 cameraPosition;   // auto-uploaded by the renderer
 uniform mat4 projectionMatrix;
 uniform mat4 viewMatrix;
