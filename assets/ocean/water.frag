@@ -98,6 +98,11 @@ void main() {
   float geoVar = min(0.25 * (dot(dndx, dndx) + dot(dndy, dndy)), 0.06);
   float alpha = sqrt(max(uOptics.x * uOptics.x + vUnresolved + variance.x + variance.y + geoVar, 1e-5));
 
+  // Single-scattering albedo: the FRACTION of the light lost along the column that is
+  // scattered back out. uScatterColor on its own is a coefficient (1/m, order 0.01..0.09),
+  // so using it as a colour made every in-scattered term ~20x too dark -- the sea's body
+  // went black and only the Fresnel-highlighted crests survived the tone map.
+  vec3 albedo = uScatterColor / max(uScatterColor + uAbsorption, vec3(1e-4));
   float NoV = max(dot(Nrm, V), 1e-4);
   float NoL = dot(Nrm, uSunDir);
 
@@ -118,13 +123,13 @@ void main() {
     const float COS_CRIT = 0.6614;  // sqrt(1 - 1/1.33^2)
     float edge = max(alpha * 1.5, 0.02);
     float win = smoothstep(COS_CRIT - edge, COS_CRIT + edge, cosI);
-    vec3 deep = uScatterColor * (skyViewLod(vec3(0.0, 1.0, 0.0), uSunDir, 5.0) + uSunColor * max(uSunDir.y, 0.0)) * 0.55;
+    vec3 deep = albedo * (skyViewLod(vec3(0.0, 1.0, 0.0), uSunDir, 5.0) + uSunColor * max(uSunDir.y, 0.0)) * 0.55;
     vec3 above = skyView(vec3(-V.x, abs(V.y), -V.z), uSunDir)
                + uSunColor * pow(max(dot(-V, uSunDir), 0.0), 48.0) * 0.6;
     vec3 c2 = mix(deep, above, win) * (1.0 - 0.55 * foam);
     // the column from the camera to the surface itself
     vec3 Tu = exp(-uAbsorption * dist);
-    fragColor = vec4(c2 * Tu + uScatterColor * (1.0 - Tu) * 0.55, 0.0);
+    fragColor = vec4(c2 * Tu + albedo * (1.0 - Tu) * 0.55, 0.0);
     return;
   }
 
@@ -143,8 +148,8 @@ void main() {
   // that light is also warmer than the zenith. Without both corrections the body of the
   // sea sits an order of magnitude below the reference's, which is what made the troughs
   // read as black holes between the highlights.
-  vec3 ambient = skyViewLod(vec3(0.0, 1.0, 0.0), uSunDir, 5.0) * vec3(2.75, 2.5, 2.1);
-  vec3 inscatter = uScatterColor * (ambient + uSunColor * 0.3 * max(uSunDir.y, 0.0));
+  vec3 ambient = skyViewLod(vec3(0.0, 1.0, 0.0), uSunDir, 3.0) * vec3(15.0, 13.6, 11.5);
+  vec3 inscatter = albedo * (ambient * 1.6 + uSunColor * 0.3 * max(uSunDir.y, 0.0));
   vec3 through = rp.rgb * absorb;
 
   // --- reflection: the sky, with the mirrored scene composited over it ----------
@@ -159,7 +164,7 @@ void main() {
   // is ~2.7 levels shorter. Clamping at 5 (what the cube's log2(alpha*650) asks for)
   // landed on the 6x3 level -- the sky's MEAN radiance -- which turned every warm
   // reflection into flat grey and left the sea lit by nothing but its own body.
-  float skyLod = clamp(log2(max(alpha * 650.0, 1.0)), 0.0, 3.0);
+  float skyLod = clamp(alpha * 4.0, 0.0, 1.0);
   vec3 refl = skyViewLod(R, uSunDir, skyLod);
   float reflAmp = uOptics.z * 0.6 / (1.0 + dist * 0.04);
   vec2 ref2 = clamp(uv + clamp(nS * reflAmp, vec2(-0.06), vec2(0.06)), vec2(0.002), vec2(0.998));
@@ -176,7 +181,7 @@ void main() {
   // so the sun acts as a small area light rather than a point: a point sun on a rough
   // surface is a few pixels of white, an area light is the broad amber road the
   // reference has.
-  float aS = max(alpha, 0.03);
+  float aS = max(alpha, 0.055);
   float a2 = aS * aS;
   float nl = max(NoL, 0.0);
   float dd = NoH * NoH * (a2 - 1.0) + 1.0;
@@ -206,7 +211,7 @@ void main() {
       m += (j == 0 ? 1.0 - (lf - l0) : lf - l0) *
            min(mix(n0, n1, smoothstep(0.0, 1.0, tt - it)) / max(lam, 1e-4), 300.0);
     }
-    spec *= mix(1.0, m, uGlint * smoothstep(4.0, 30.0, dist));
+    spec *= mix(1.0, clamp(m, 0.55, 6.0), uGlint * smoothstep(25.0, 90.0, dist));
   }
   vec3 sun = uSunColor * spec * (1.0 - foam * 0.7);
 
@@ -214,13 +219,13 @@ void main() {
   float h = max(vWorld.y, 0.0);
   float k1 = uSSS.x * h * pow(clamp(dot(uSunDir, -V), 0.0, 1.0), 4.0) * pow(0.5 - 0.5 * NoL, 3.0);
   float k2 = uSSS.y * pow(NoV, 2.0);
-  vec3 sss = (k1 + k2) * uScatterColor * uSunColor
-           + uSSS.z * max(NoL, 0.0) * uScatterColor * uSunColor;
+  vec3 sss = (k1 + k2) * albedo * uSunColor
+           + uSSS.z * max(NoL, 0.0) * albedo * uSunColor;
 
   vec3 foamCol = (uSunColor * max(NoL, 0.0) * 0.35 + ambient * 0.85) * uFoam.w * vec3(0.72, 0.86, 0.9);
   vec3 body = through + (inscatter + sss) * (1.0 - absorb);
   body = mix(body, foamCol, foam * 0.85);
-  vec3 col = mix(body, refl, F) + sun;
+  vec3 col = mix(body, refl, F) + sun + refl * 0.22 * (1.0 - F);
   // Absolute level calibration. The reference's frame has a sky-to-water ratio of about
   // 1.8; this pass came out at ~3.5 because two of its inputs are weaker than the cube
   // they were ported from: the reflected sky is a 192x108 warped LUT rather than a 1024
@@ -228,7 +233,7 @@ void main() {
   // and the lagoon that reverts the body colour is a procedural floor rather than the
   // reference's lit sand. Rather than distort either input, the pass is lifted as a
   // whole to the level the tone mapping was designed around.
-  col *= 1.7;
+  col *= 1.45;
 
   // --- aerial perspective into the horizon sky ---------------------------------
   // Without this the far water stays as dark as the near water and the horizon reads

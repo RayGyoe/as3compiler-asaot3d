@@ -4181,3 +4181,42 @@ Stage3D 的寄存器文件没有 stage 之分，但 SPIRV-Cross 给原生 GLSL �
   同等粗糙 —— 表现是「高光碎成一片白线」而不是「高光太强」。调参前先读该通道的实际值。
 - **R81**：**深水板与潟湖是两种画法**。近场水色由「海床反照率 × 逐波长透过率」决定，
   散射系数只决定没有海床时的兜底色；把海床沉到看不见的深度，画面就一定是一块黑蓝板。
+
+### 39.9 上屏链路与 dump 分叉（D204–D205、R82–R83，2026-11-02）
+
+39.7 的全部结论都是拿 `drawToBitmapData` 的 PPM dump 验证的，而**窗口里显示的从来不是那张图**。
+本轮把「上屏」与「dump」当成两个独立产物逐一钉死，两条都以「画面错、着色器对」告终。
+
+- **D204 宿主在 `updateFrame()` 之后又渲染了一遍 `_scene`（上屏错帧的根因）**。
+  `Stage3DApp.onEnterFrame` 的顺序是 `updateFrame()` → `_renderer.render(_scene, _camera)` →
+  `present()`。前两步对所有「在 `updateFrame` 里画一帧」的 demo 是重复的：M34 的
+  `updateFrame` 已经把 FFT→焦散→反射→opaque→water→spray→composite 全画完，宿主这一次
+  `render(_scene)` 带 `clear`（clear=1 的全屏 quad）把合成帧整个盖掉，再画一次天空+地形。
+  于是窗口里是「金色天 + 黑海床、没有水面」，而 dump（在 `drawComposite()` 内部读回）是成品。
+  两侧只在海面区域不同，正是这条的指纹。修复：`Stage3DApp._ownsFrame`（默认 false，零成本），
+  M34 在 `createScene()` 里置 true。
+- **D205 去掉 `_final` + present 时把唯一一次翻转也丢了**。composite 改为直接写 drawable 后，
+  render target（row 0 在顶部）与全屏 quad（`vUV.y` 0 在底部）的行约定第一次正面相遇，
+  整幅画面上下颠倒。之所以一直没被发现：`drawToBitmapData` 读的是同一个（同样颠倒的）
+  back buffer，dump 和窗口一起颠倒，看起来“一致”。
+  修复：翻转移到 composite 自身的采样坐标 `uv = vec2(vUV.x, 1.0 - vUV.y)`，
+  对 uColor/uWater/uSpray/uLens/uShafts 一视同仁，仍只有一处。
+
+诊断方法（可复用于任何「上屏≠读回」）：
+1. 冻结动画（`FREEZE_AT` + `dt=0`），否则水在动，任何跨时刻对比都不成立。
+2. 用**逐 pass 读回**定位窗口内容停在哪个 pass：M34 的 `pass-opaque.ppm` 与窗口逐像素同级，
+   `pass-water.ppm` 与 opaque 相同（水是画进离屏 `_water` 的），说明窗口停在 composite 之前。
+3. 读纹理别用 `getBytes:` 判 GPU 内容的时序问题 —— 它读的是 CPU 可见副本，
+   commit 后没等 GPU 完成时是旧值。用同队列 blit 到 shared buffer + `waitUntilCompleted`，
+   那才是合成器会看到的内容。
+4. 在 pass 记录点打印 `rp.colorAttachments[0].texture == c->target` 与 `numIndices`，
+   直接看「这一帧到底有没有一个画到后缓冲的 6 索引 quad」。
+
+### 39.10 本轮新增规则（R82–R83）
+
+- **R82**：**在 `updateFrame()` 里自绘整帧的 demo 必须置 `_ownsFrame = true`**。宿主的
+  `render(_scene, _camera)` 会 clear 后重画 `_scene`，对多 pass demo 就是「静默丢帧」——
+  不报错、自检全绿、dump 还是对的，只有上屏错。
+- **R83**：**整条链路只允许存在一处翻转**，且它必须挂在「跨越 render target → drawable」的
+  那一步上。一旦那一步被换掉（去掉中间纹理、让上游直接写 drawable），必须重新确认翻转还在，
+  并**用窗口截图而不是 dump 验证**——两侧同时颠倒时，dump 对比永远看不出问题。

@@ -113,12 +113,18 @@ package
         // tail of assets/ocean/water.frag). Kept as a constant so a probe run is exactly
         // reproducible; nothing in a shipped frame reads it.
         private static const DEBUG:int = 0;
+        private var _chan:int = DEBUG;
 
         // Write the composed frame to temp/m34-frame.ppm once the checks are in. A
         // window capture reads the window server's last snapshot, which goes stale for
         // this demo (the Metal layer presents without an AppKit redraw), so the only
-        // frame worth judging is the one read back out of _final.
-        private static const DUMP_FRAME:Boolean = true;
+        // frame worth judging is the one read back out of the back buffer.
+        private static const DUMP_FRAME:Boolean = false;
+
+        // Freeze the animation once this frame count is reached, so a window capture
+        // and an in-app readback can be compared pixel for pixel. -1 disables it.
+        private static const FREEZE_AT:int = -1;
+        private static const DUMP_AT:int = 60;
 
         // Absorption in 1/m. Red dies an order of magnitude faster than blue, which is
         // the whole difference between blue water and green water.
@@ -201,7 +207,6 @@ package
 
         private var _refl:Object;
         private var _reflDepth:Object;
-        private var _final:Object;
         private var _opaque:Object;
         private var _opaqueDepth:Object;
         private var _water:Object;
@@ -256,6 +261,9 @@ package
         // ------------------------------------------------------------------
         override protected function createScene():void
         {
+            // This demo owns the back buffer: every pass from the FFT to the graded
+            // composite is issued here, so the host must not render _scene on top of it.
+            _ownsFrame = true;
             _sunX = Math.cos(SUN_ELEV) * Math.sin(SUN_AZIM);
             _sunY = Math.sin(SUN_ELEV);
             _sunZ = Math.cos(SUN_ELEV) * Math.cos(SUN_AZIM);
@@ -328,11 +336,6 @@ package
             // the last level of an unmipmapped target is black, not blurred.
             _refl = _native["createTexture"](RW / 2, RH / 2, Context3DTextureFormat.RGBA_HALF_FLOAT, true, true);
             _reflDepth = _native["createDepthTexture"](RW / 2, RH / 2, "depth32f");
-            // The composite writes here, not straight to the back buffer: reading a
-            // Metal drawable back with drawToBitmapData any time before present gave
-            // the clear colour instead of the frame, so the graded image gets a target
-            // it can be probed from, and one cheap copy presents it.
-            _final = _native["createTexture"](RW, RH, Context3DTextureFormat.RGBA_HALF_FLOAT, true, false);
             _opaque = _native["createTexture"](RW, RH, Context3DTextureFormat.RGBA_HALF_FLOAT, true, false);
             _opaqueDepth = _native["createDepthTexture"](RW, RH, "depth32f");
             _water = _native["createTexture"](RW, RH, Context3DTextureFormat.RGBA_HALF_FLOAT, true, false);
@@ -608,7 +611,10 @@ package
         {
             if (_noChannel) return;
             if (dt > 0.05) dt = 0.05;          // a stalled first frame must not teleport
-            _time += dt;
+            if (FREEZE_AT < 0 || _frames < FREEZE_AT) _time += dt;
+            // A frozen frame must be bit-identical run to run, so the wave/foam
+            // accumulator stops too: uDt is part of the simulation state.
+            if (FREEZE_AT >= 0 && _frames >= FREEZE_AT) dt = 0;
             this.updateCamera();
             this.simulate(dt);
             this.buildCaustics();
@@ -741,7 +747,7 @@ package
             m.setUniformValue("uGlint", 0.6);
                 var f:Vector.<Number> = _camera.matrixWorld.elements;
             m.setUniformValue("uCamForward", [-f[8], -f[9], -f[10]]);
-            m.setUniformValue("uDebug", DEBUG);
+            m.setUniformValue("uDebug", _chan);
             m.setUniformValue("uCellStep", 6.283185307179586 / 320.0);
             m.setUniformValue("uWind", WIND_SPEED);
 
@@ -825,29 +831,47 @@ package
             m.setUniformValue("uSunColor", SUNCOL);
             m.setUniformValue("uUnder", [0.055, 0.9, 42.0, 0.0]);
             m.setUniformValue("uExposure", 0.45);
-            m.setUniformValue("uDebug", DEBUG);
+            m.setUniformValue("uDebug", _chan);
 
             if (!_dbgDescribed) { _dbgDescribed = true; logLine("COMPOSITE PROGRAM:\n" + _nr.describeProgram(m)); }
-            this.pass(m, [_final], null);
-            _mPresent.setUniformValue("uSrc", _final);
+            // One composite, straight into the back buffer. An intermediate _final
+            // texture plus a copy sampled by the window compositor disagreed with
+            // the same texture read back with drawToBitmapData: the window showed
+            // the opaque pass while the readback showed the graded frame.
             _native["setBackBuffer"]();
             _context.clear(0, 0, 0, 1);
             _context.setCulling("frontAndBack");
-            _nr.drawNative(_quad, _mPresent);
+            _nr.drawNative(_quad, m);
             _context.setCulling("back");
-            if (DUMP_FRAME && _frames == 30 && !_dumped) { _dumped = true; this.dumpFrame("../../temp/m34-frame.ppm"); }
+            if (DUMP_FRAME && _frames == DUMP_AT && !_dumped)
+            {
+                _dumped = true;
+                this.dumpFrame("../../temp/m34-frame.ppm");
+            }
         }
 
-        // Copy _final into the back buffer and write it as a binary PPM. Development
-        // only: it allocates a full-resolution bitmap and touches the filesystem.
+        // Read the composed frame back with drawToBitmapData and write it as a binary
+        // PPM. Development only: it allocates a full-resolution bitmap and touches the
+        // filesystem. The back buffer is the only frame worth judging -- a window
+        // capture goes through the compositor and can disagree.
         private function dumpFrame(path:String):void
         {
-            _mPresent.setUniformValue("uSrc", _final);
-            _native["setBackBuffer"]();
-            _context.clear(0, 0, 0, 1);
-            _context.setCulling("frontAndBack");
-            _nr.drawNative(_quad, _mPresent);
-            _context.setCulling("back");
+            this.dumpSource(null, path);
+        }
+
+        // Same present/readback pipeline for any source texture, so a pass's own
+        // contents can be compared against what the window is actually showing.
+        private function dumpSource(src:Object, path:String):void
+        {
+            if (src != null)
+            {
+                _mPresent.setUniformValue("uSrc", src);
+                _native["setBackBuffer"]();
+                _context.clear(0, 0, 0, 1);
+                _context.setCulling("frontAndBack");
+                _nr.drawNative(_quad, _mPresent);
+                _context.setCulling("back");
+            }
 
             var w:int = stage.stageWidth;
             var h:int = stage.stageHeight;
@@ -910,6 +934,7 @@ package
                 NativeApplication.nativeApplication.exit();
                 return;
             }
+
             if (!CHECK_ENABLED) return;
             if (!_checked && _frames > 4)
             {

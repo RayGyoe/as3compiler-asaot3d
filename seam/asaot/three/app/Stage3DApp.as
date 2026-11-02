@@ -60,6 +60,11 @@ package asaot.three.app
         protected var _renderer:AGALRenderer;
         protected var _scene:Scene;
         protected var _camera:Camera;
+        // Set true by a demo that draws the ENTIRE frame itself (several passes, its own
+        // clears, its own target switches) and therefore must not also be handed the
+        // host's single `render(_scene, _camera)` -- see onEnterFrame(). Default false
+        // keeps every ordinary demo on the original one-render-per-frame contract.
+        protected var _ownsFrame:Boolean = false;
 
         // 0 until the backend reports a panel rate (web/offscreen backends never
         // do). Kept for logs and for subclasses that want to show it.
@@ -296,7 +301,13 @@ package asaot.three.app
             try
             {
                 updateFrame(elapsedMs);
-                _renderer.render(_scene, _camera);
+                // A demo that composes its own multi-pass frame (owner of the back buffer
+                // for the whole frame) must not also get this one-shot scene render: it
+                // CLEARS the back buffer and redraws _scene over whatever updateFrame()
+                // left there. asaot3d M34 paid for that with a window that showed the
+                // opaque pass while the same frame read back inside updateFrame() was the
+                // finished, graded composite -- the second render silently overwrote it.
+                if (!_ownsFrame) _renderer.render(_scene, _camera);
             }
             catch (err2:Error)
             {

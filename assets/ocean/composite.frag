@@ -35,12 +35,26 @@ vec3 aces(vec3 c) {
   return clamp(ACES_OUT * (a / b), 0.0, 1.0);
 }
 
+// Linear light becomes display-referred exactly once, here. The back buffer this pass
+// draws into is a plain BGRA8Unorm drawable, not an _sRGB view, so Metal does NOT encode
+// on write: handing it linear values and letting the display read them as sRGB crushes
+// every midtone (a 0.30 linear sea shows as 0.30 instead of 0.58). The pass chain is
+// linear end to end, so the transfer function belongs at this one point.
+vec3 toSrgb(vec3 c) {
+  vec3 lo = c * 12.92;
+  vec3 hi = 1.055 * pow(max(c, vec3(1e-5)), vec3(1.0 / 2.4)) - 0.055;
+  return mix(lo, hi, step(vec3(0.0031308), c));
+}
+
 void main() {
-  // No flip here: every target in this pass chain (opaque, water, spray, lens, shafts and
-  // this composite's own output) is written and sampled through the same fullscreen quad,
-  // so their rows already agree. The one flip in the chain lives in present.frag, which is
-  // the only pass that crosses from a render-target texture to the drawable.
-  vec2 uv = vUV;
+  // This pass now writes the DRAWABLE directly (the intermediate `_final` + present copy
+  // was dropped), and that is the one place in the chain where the row convention
+  // differs: every render target here has row 0 at the TOP, while a fullscreen quad's
+  // vUV.y is 0 at the BOTTOM. Flipping the sample coordinate is therefore the single
+  // flip -- applied to uColor/uWater/uSpray/uLens/uShafts alike, so they stay in
+  // agreement with each other. Without it the whole scene is upside down on screen
+  // (and identically upside down in drawToBitmapData, which is how it was missed).
+  vec2 uv = vec2(vUV.x, 1.0 - vUV.y);
   vec4 o = textureLod(uColor, uv, 0.0);
   vec4 w = textureLod(uWater, uv, 0.0);
 
@@ -79,5 +93,5 @@ void main() {
   col = aces(col * uExposure);
   vec2 q = uv - 0.5;
   col *= 1.0 - 0.22 * dot(q, q);
-  fragColor = vec4(col, 1.0);
+  fragColor = vec4(toSrgb(col), 1.0);
 }
