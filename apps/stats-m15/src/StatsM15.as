@@ -60,6 +60,14 @@ package
         private static const CALLS_MAX:Number = 40;
         private static const TRIS_MAX:Number = 8000;
 
+        // The host shows a HUD on every demo since M35; this demo is the one whose
+        // SUBJECT is the HUD (click to cycle, a press on the tile is consumed), so it
+        // keeps building its own and tells the host not to add a second one.
+        override protected function showStats():Boolean
+        {
+            return false;
+        }
+
         override protected function createScene():void
         {
             _scene = new Scene();

@@ -1,0 +1,11 @@
+# Extra SOURCE ROOTS for this demo, one per line, relative to the asaot3d root.
+#
+# Both backends consume this file (tools/build-demo.sh): --as-class-path for
+# as-aot and -source-path+= for mxmlc, so the demo cannot build on one backend
+# and miss the other.
+#
+# The control panel is the asaotui toolkit, LINKED in place rather than copied --
+# the same arrangement apps/panel-m24 uses, and for the same reason: a copy is a
+# fork that drifts, and every widget fix would have to be made twice.
+../asaotui/seam
+../asaotui/kit

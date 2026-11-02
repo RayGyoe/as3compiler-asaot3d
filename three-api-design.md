@@ -1394,7 +1394,7 @@ resize 可能早于 `CONTEXT3D_CREATE` 到达（窗口已经在屏幕上，而 c
 首帧 `elapsedMs = 0`：没有上一帧可差分，给 0 而不是 `getTimer()` 的绝对值，否则 delta 驱动的
 demo 第一帧会跳一大步。
 
-### 21.4 验收（`probes/apphost-smoke-m16/`，24 项 ALL PASS）
+### 21.4 验收（`probes/apphost-smoke-m16/`，30 项 ALL PASS）
 
 无 GPU 也能钉死行为的部分（A 7 / B 7 / C 6 / D 4）：
 
@@ -1431,6 +1431,24 @@ triangles=5428 / culled=40` 等），说明宿主重构没有改变渲染结果�
   HUD 也因此不用乘 PR（§20.5）。
 - **正交相机不自动 refit**（D107）、**不提供 `Stage3DApp` 的多窗口管理**：多窗口 + 多个
   `Stage3DApp` 实例目前没有 demo 需求，登记为未验证组合，不宣称支持。
+
+### 21.6 宿主 HUD：统计面板归宿主，只有「画了多少」归 demo（D210，2026-11-03）
+
+M24 时 FPS/MS/MB/CALLS/TRIS 五块面板写在 `PanelM24` 里。M34 起这套统计要跨 demo 复用，
+于是上提到宿主，**默认全开**：
+
+- `Stage3DApp` 在 `createScene()` 之后建 HUD，每帧在 `present` 之后更新（与 `afterFrame`
+  同一时序理由：`Graphics` 改动落在下一帧合成里）。
+- 子类用**保护方法 `showStats():Boolean` 关闭**（默认 `true`）。目前唯一的关闭者是
+  `StatsM15` —— 那个 demo 的主题就是自己搭 HUD，宿主再叠一层就重复了。
+- `stats` getter 暴露 HUD 实例，`hudCallsMax` / `hudTrisMax` 是给面板条形图用的归一化上界。
+- **draw 计数与三角数由 demo 记账**：`frameDrawCalls()` / `frameTriangles()` 两个钩子默认
+  返回 renderer 自报值。M34 必须覆盖——它的帧里既有 `renderer.render()` 的场景，也有一堆
+  手工 `NativeShaderRenderer` pass（FFT 级联、反射、焦散、水面、合成），renderer 的计数器
+  只看得见前者。M34 的实际做法是帧内 `_draws` 自增、`frameTriangles()` 返回
+  `renderer.triangles + _draws*2`（每个手工 pass 都是一个全屏四边形），实测 76 CALLS / 75–77。
+- **不要把 HUD 写成 demo 责任**：统计的刷新率、delta、显存估算、面板点击切换都是宿主知识；
+  让每个 demo 抄一遍，只会得到 N 份彼此不一致的实现。
 
 ## 22. 纹理状态真的生效：wrap / filter / mip / flipY / colorSpace（D109–D114、R29–R31，2026-10-31 M17 拍板）
 
@@ -4300,3 +4318,51 @@ D207 把帧时间从 19–27 ms 压到 4.6 ms 之后，CPU 仍稳定在 83% 左�
   不是每个 demo 的正确值；与浏览器参照对照时，demo 必须声明 `frameRateCap()`
   到参照页面的 vsync 率，否则测出来的 CPU 差一半是「跑了双倍帧」而不是「实现更慢」。
   判据是**帧间隔分布**（p50/p95/p99）与**每帧成本**两条同时给出；只有帧率数字没有意义。
+
+### 39.15 M34 控制面板：模型在上、uniform 在下（D211–D214、R88–R89，2026-11-03）
+
+参照页面（`temp/ultra-water/src/main.js` 的 lil-gui）有十几个分区。移植到 `asaotui` 时
+唯一能守住的不变量是**单向数据流**：
+
+```
+widget 写模型                        帧循环独占写下游
+OceanPanelView ──► OceanParams ──► applyView()/applyParams() ──► uniforms / bake / camera
+```
+
+- **D211 面板只写模型**。`OceanParams` 存的是**作者单位**（度、km、m/s、倍数），不是
+  uniform 单位；`OceanM34` 的 `updateFrame()` 是唯一的读者。好处是「重置」等于把模型
+  拷回默认值，不需要知道任何 uniform 名字，面板也不需要持有 `NativeShaderRenderer`。
+- **D212 两种 bake 各自带脏判定**。太阳/云（elevation、azimuth、intensity、cloudCoverage）
+  变化 → `bakeAtmosphere()`（天穹 LUT + 地形/水面太阳 uniform）；海况（风速、风向、fetch、
+  waveScale、spreadBlend、swell）变化 → `bakeSpectra()`（JONSWAP 四路级联）。
+  判定基准是**上一次应用成功的值**（`markParamsApplied()`），不是「模型 != 默认」，所以拖动
+  滑块时只在值真的动的那一帧重烘。其余便宜的量（光学吸收、散射、曝光、choppiness、泡沫）
+  每帧直接推 uniform，无脏标志——**贵的才判脏，便宜的别判**。
+- **D213 视点是一次性快照**。`view == 0` 是自动巡航；选中命名视点只写一次相机（与 lil-gui
+  的 `views` 行为一致：点一次、之后仍可自由操作），每个视点自带 `setSun()`，与参照
+  `views` 表逐行对应（Golden hour 3.5°/205°、Breakers 22°、Lagoon 52°、Open ocean 14°、
+  Aerial 30°、Underwater 48°）。参照的 `Flotsam` 未移植——那需要漂浮物几何，不是相机。
+- **D214 关反射要留一张黑贴图**。水面程序**无条件**采样 `uReflection`，Metal 里未绑定的
+  采样器是校验失败而不是「返回黑色」。所以 `reflections == false` 时仍然给 `uReflection`
+  绑一张 1×1 黑纹理（只在创建时清一次），跳过的是 `drawReflection()` 的整趟镜像渲染。
+- **`asaotui` 的一条坑：`ScrollView` 里的 slider 行必须给显式高度**。滑块轨道画在
+  `absH - 12` 附近、标签在顶部，行高 auto 时被压成一行 → 轨道与标签重叠；给
+  `size: [inner, 34]`（标签 11px + 轨道 + 间距）才是「标签在上、轨道在下」，而且这个
+  显式高度同时成为 `ScrollViewWidget.measure` 的逐子高度，长分区才会「滚动」而不是被压扁。
+  同理，面板根用 `alignItems: "flex-end"` 靠右，**不要**用 `justifyContent`：asaotui 的
+  `Style.resolve` 会沿祖先链继承未设置的属性，`justifyContent` 会漏进 select 的下拉行。
+- **验收**：`probes/panel-params-m35/` **66 项 ALL PASS**（默认值 11 / 0..1 映射 7 /
+  21 个控件的按名双向映射与八条夹取 30 / 水色 8 / reset 4 / describe 4 / 未知名抛错 2）。
+  它能在无 GPU 的情况下钉住模型，但钉不住面板：**面板本身只有肉眼验收**（真实鼠标事件
+  打开下拉、拖滑块、勾掉反射、Reset、折叠/展开），这正是「自动 PASS ≠ 可用」的那一类。
+
+### 39.16 本轮新增规则（R88–R89）
+
+- **R88**：**面板不能假装拥有参照里兑现不了的能力**。移植参照 GUI 时先过一遍着色器：
+  本移植的 `water.frag` 没有 turbidity、没有岸线波浪、后期只有 exposure（没有
+  bloom/contrast/saturation/auto-exposure），那么这些控件就不出现在面板上；缺的项写进
+  文档，而不是做成「拖了没反应」的假滑块。
+- **R89**：**统计归宿主、计数归 demo**。HUD 的建立/刷新/切换由 `Stage3DApp` 提供
+  （`showStats()` 关闭），draw/frame 计数由 demo 用 `frameDrawCalls()`/`frameTriangles()`
+  记账；`renderer` 自报值只在「整帧只走 `renderer.render()`」的 demo 里可以直接用。
+

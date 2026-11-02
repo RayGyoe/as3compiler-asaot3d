@@ -38,6 +38,15 @@
 //   lens + shafts    ->  only when the camera is near/under the surface
 //   composite        ->  assemble, absorb, grade, one draw to the back buffer
 //
+// THE CONTROL PANEL (M35) drives the same parameters `temp/ultra-water/src/main.js`
+// exposes through lil-gui: sun & sky, sea state, water optics, exposure and planar
+// reflections. It is a LINKED asaotui panel (apps/ocean-m34/class-paths), the same
+// arrangement M24 uses, and it follows the same one-writer rule: a widget writes
+// panel.OceanParams, and this class's frame loop is the only reader. Two entries
+// cost a REBAKE rather than a uniform write (the atmosphere LUTs and the JONSWAP
+// spectra are baked), which is why applyParams() compares against the last applied
+// values instead of pushing every slider every frame.
+//
 // WRITING DEPTH INTO ALPHA is the one decision the reference does not make. three.js can
 // sample a depth texture; this channel cannot (sampler2D depth is not portable through
 // SPIRV-Cross/Metal, measured in M31 -- see three-api-design.md). The water pass has to
@@ -72,6 +81,14 @@ package
     import asaot.three.objects.Mesh;
     import asaot.three.scenes.Scene;
 
+    import asaot.ui.Dirty;
+    import asaot.ui.Theme;
+    import asaot.ui.ThemeTokens;
+    import asaot.ui.UiApp;
+
+    import panel.OceanParams;
+    import panel.OceanPanelView;
+
     public class OceanM34 extends Stage3DApp
     {
         // ------------------------------------------------------------------
@@ -85,7 +102,9 @@ package
         private static const P2:Number = 12.0;
         private static const P3:Number = 2.1;
 
-        private static const WIND_ANGLE:Number = 0.6;
+        // (WIND_ANGLE is gone: the wind bearing is panel.OceanParams.windDirection,
+        // seeded to this 0.6 rad. Keeping a second copy here is how a "constant" and a
+        // slider end up disagreeing.)
 
         // Internal render size. Fixed, not the stage size: a readback is then 768x480 in
         // both the AOT and the adl run, and the composite is the only pass that touches
@@ -127,37 +146,40 @@ package
         private static const FREEZE_AT:int = -1;
         private static const DUMP_AT:int = 60;
 
+        // Dump the material reflection tables (every uniform's slot and type) once, on
+        // the first water/composite draw. Off by default: it is a diagnosis for "the
+        // program does not declare uX" warnings, not part of a demo run.
+        private static const TRACE_PROGRAMS:Boolean = false;
+
         // Absorption in 1/m. Red dies an order of magnitude faster than blue, which is
-        // the whole difference between blue water and green water.
-        private static const ABSORB:Array = [0.17, 0.055, 0.038];
-        private static const SCATTER:Array = [0.010, 0.062, 0.085];
+        // the whole difference between blue water and green water. The VALUES now live
+        // in panel.OceanParams (a preset + clarity), because the panel owns the sea's
+        // colour; these two are only the defaults' documentation.
         // Reference units: radiance is relative to the sun's illuminance outside the
         // atmosphere, and the sun's own colour at sea level is its transmittance times
         // sunIntensity (Ultra-Water src/scene/sky.js). At the 11 degree elevation used
         // here that integral is [0.675, 0.451, 0.232], so the colour is that times 9 --
         // NOT a hand-picked [1.35, 1.16, 0.94], which made the whole scene ~4x dark and
         // the sun's disc 16x dark.
-        private static const SUN_INTENSITY:Number = 9.0;
-        private static const SUN_ILLUM:Number = Math.PI * SUN_INTENSITY;   // sky LUT scale
-        private static const SUNCOL:Array = [3.186, 1.177, 0.191];
+        //
+        // SUNCOL_REF is the colour at the reference's own sunIntensity of 9; the panel's
+        // intensity slider scales BOTH it and the sky's illuminance,
+        // `sunColor = T * intensity` and `PI * intensity` in the reference
+        // (src/scene/sky.js applySun), i.e. linearly and independently -- scaling one of
+        // the two would be an intensity SQUARED.
+        private static const SUN_INTENSITY_REF:Number = 9.0;
+        private static const SUNCOL_REF:Array = [3.186, 1.177, 0.191];
 
-        // 3.5 degrees above the horizon: the reference's "Golden hour" default, and the
-        // reason its water is a long amber road rather than a glare disc. SUNCOL is the
-        // same transmittance integral times 9, evaluated at this elevation (the CPU mirror
-        // of the LUT in Ultra-Water src/scene/atmosphere.js): at 11 degrees it is
-        // [6.077, 4.062, 2.087], and the ten degrees of path closer to the horizon is
-        // most of the difference between daylight blue and this.
-        private static const SUN_ELEV:Number = 0.06109;
-        private static const SUN_AZIM:Number = 3.5779;   // 205 deg, the reference's azimuth
+        private static const DEG2RAD:Number = 0.017453292519943295;
 
         // Sea state, from Ultra-Water's OceanSim defaults: two JONSWAP trains (a 9 m/s
         // wind sea over a 120 km fetch and a 7 m/s swell over 900 km), 3.3 peak
         // enhancement, a 0.04 short-wave fade, and 0.08 on the capillary cascade --
         // 0.004 there is the bare spectrum, whose mean square slope is 3x Cox-Munk for
-        // the whole sea and turns the water to brushed metal.
-        private static const WIND_SPEED:Number = 9.0;
+        // the whole sea and turns the water to brushed metal. The wind speed, fetch,
+        // directions and scales are panel parameters now (panel.OceanParams).
         private static const SWELL_SPEED:Number = 7.0;
-        private static const CHOPPINESS:Number = 0.85;
+        private static const SWELL_FETCH_KM:Number = 900.0;
         private static const CAP_FADE:Number = 0.08;
 
         private static const PROBE_FS:String =
@@ -214,6 +236,7 @@ package
 
         private var _refl:Object;
         private var _reflDepth:Object;
+        private var _reflOff:Object;
         private var _opaque:Object;
         private var _opaqueDepth:Object;
         private var _water:Object;
@@ -262,6 +285,44 @@ package
         private var _sunX:Number = 0;
         private var _sunY:Number = 0;
         private var _sunZ:Number = 0;
+        // Sun radiance and the sky LUT's illuminance scale, both derived from the
+        // panel's intensity: `sunColor = transmittance * intensity` and
+        // `illuminance = PI * intensity` in the reference.
+        private var _sunCol:Array = [3.186, 1.177, 0.191];
+        private var _sunIllum:Number = Math.PI * SUN_INTENSITY_REF;
+
+        // The control panel. `_params` is the only thing a widget writes; see
+        // applyParams() for the single reader.
+        private var _params:OceanParams;
+        private var _panel:OceanPanelView;
+        private var _ui:UiApp;
+
+        // Last APPLIED parameter values. The atmosphere LUTs and the JONSWAP
+        // spectra are BAKED, so a drag must trigger one bake, not one per frame;
+        // and a uniform write on a value that did not move is a wasted
+        // setUniformValue per material per frame.
+        private var _appliedElev:Number = -1e9;
+        private var _appliedAzim:Number = -1e9;
+        private var _appliedSunI:Number = -1e9;
+        private var _appliedCloud:Number = -1e9;
+        private var _appliedWindSpeed:Number = -1e9;
+        private var _appliedWindDir:Number = -1e9;
+        private var _appliedFetch:Number = -1e9;
+        private var _appliedWaveScale:Number = -1e9;
+        private var _appliedSpread:Number = -1e9;
+        private var _appliedSwellScale:Number = -1e9;
+        private var _appliedSwellDir:Number = -1e9;
+
+        // Camera selection: 0 is the demo's own 26 s loop, 1.. index the reference's
+        // named views. `_viewApplied` makes a fixed view a one-shot (a view that
+        // reinstalled its camera every frame would fight nothing, but it would also
+        // make "look around then switch back" impossible to add later).
+        private var _viewApplied:int = -1;
+
+        // Draws issued this frame, for the HUD's CALLS tile: this demo issues ~80
+        // offscreen passes plus two scene renders, and `renderer.drawCalls` only ever
+        // reports the LAST render, i.e. `1`.
+        private var _draws:int = 0;
 
         // ------------------------------------------------------------------
         // Scene construction
@@ -271,9 +332,18 @@ package
             // This demo owns the back buffer: every pass from the FFT to the graded
             // composite is issued here, so the host must not render _scene on top of it.
             _ownsFrame = true;
-            _sunX = Math.cos(SUN_ELEV) * Math.sin(SUN_AZIM);
-            _sunY = Math.sin(SUN_ELEV);
-            _sunZ = Math.cos(SUN_ELEV) * Math.cos(SUN_AZIM);
+
+            // The panel's model exists BEFORE the scene, because the scene is built
+            // from it: the sun's bearing, the sea state and the water colour are all
+            // parameters now, not constants. `_params` keeps the reference's defaults,
+            // so this is the same scene the previous revision built.
+            _params = new OceanParams();
+            this.updateSun();
+
+            // One HUD tile shows ~86 passes; the default 40 would pin the bar at full
+            // height on every frame and hide the variation a HUD is for.
+            hudCallsMax = 120;
+            hudTrisMax = 400000;
 
             if (!RendererFactory.hasNativeChannel() || !(_renderer is NativeShaderRenderer))
             {
@@ -307,9 +377,43 @@ package
             this.bakeSpectra();
             _fnBackBuffer();
 
+            // The reflection stand-in: one clear into a 1x1 target, once.
+            _fnSetTargets([_reflOff], null);
+            _context.clear(0, 0, 0, 1, 1, 0, 7);
+
+            // Remember what the bakes were made from, so the first frame does not
+            // immediately re-bake them (applyParams() compares against these).
+            this.markParamsApplied();
+
+            this.buildPanel();
+
             logLine("ocean-m34: 4 cascades (" + P0 + "/" + P1 + "/" + P2 + "/" + P3 + " m) x " +
                 N + " FFT, " + RW + "x" + RH + " internal; atmosphere + caustics + spray + " +
                 "underwater + planar reflection; " + (18 * 4 + 14) + " passes/frame");
+            logLine("ocean-m34 panel: " + _params.describe());
+        }
+
+        // The asaotui control panel, linked in place (class-paths). Built from
+        // createScene() so the first painted frame already has it: a panel that waits
+        // for a click shows an empty strip in every screenshot.
+        private function buildPanel():void
+        {
+            // Dark palette: the panel is a dark slab over a dark sea, and the light
+            // default would put grey-on-grey labels next to a golden sky.
+            Theme.setTheme(ThemeTokens.dark());
+
+            var self:OceanM34 = this;
+            this._panel = new OceanPanelView(this._params, function (d:int):void
+            {
+                self._ui.invalidate(d);
+            });
+            this._panel.setStageSize(stage.stageWidth, stage.stageHeight);
+
+            this._ui = new UiApp(this._panel);
+            this._ui.mount(stage);
+            this._ui.attachRoot();
+            this._ui.invalidate(Dirty.ALL);
+            this._ui.reflow();
         }
 
         // Every render target. Float where the payload is not a colour: an FFT
@@ -346,6 +450,10 @@ package
             // the last level of an unmipmapped target is black, not blurred.
             _refl = _native["createTexture"](RW / 2, RH / 2, Context3DTextureFormat.RGBA_HALF_FLOAT, true, true);
             _reflDepth = _native["createDepthTexture"](RW / 2, RH / 2, "depth32f");
+            // Stand-in for "reflections off": the water program ALWAYS samples
+            // uReflection, and an unbound sampler is a Metal validation failure that
+            // draws nothing. 1x1 black, cleared once below.
+            _reflOff = _native["createTexture"](1, 1, Context3DTextureFormat.RGBA_HALF_FLOAT, false, false);
             _opaque = _native["createTexture"](RW, RH, Context3DTextureFormat.RGBA_HALF_FLOAT, true, false);
             _opaqueDepth = _native["createDepthTexture"](RW, RH, "depth32f");
             _water = _native["createTexture"](RW, RH, Context3DTextureFormat.RGBA_HALF_FLOAT, true, false);
@@ -431,8 +539,11 @@ package
         }
 
         // ------------------------------------------------------------------
-        // Atmosphere: three bakes, once. The sky-view bake is 32 samples over 192x108,
-        // so it is the one that would be felt if it ran per frame.
+        // Atmosphere: three bakes, once -- and again on every sun/cloud edit, which is
+        // why it takes its inputs from `_params` instead of constants. The bake is three
+        // full-screen passes at 256x64 / 32x32 / 192x108, so a drag that re-bakes every
+        // frame is affordable; that is the trade the reference makes too (`sunDirty` ->
+        // applySun() on the next frame).
         // ------------------------------------------------------------------
         private function bakeAtmosphere():void
         {
@@ -450,16 +561,20 @@ package
             _mSkyLut.setUniformValue("uTransLut", _transLut);
             _mSkyLut.setUniformValue("uMsLut", _msLut);
             _mSkyLut.setUniformValue("uSunMu", _sunY);
-            _mSkyLut.setUniformValue("uSunIllum", SUN_ILLUM);
+            _mSkyLut.setUniformValue("uSunIllum", _sunIllum);
             this.pass(_mSkyLut, [_skyLut], null);
             _fnMips(_skyLut);
 
             _mSky.setUniformValue("uSunDir", [_sunX, _sunY, _sunZ]);
-            _mSky.setUniformValue("uSunColor", SUNCOL);
-            _mSky.setUniformValue("uSunIllum", SUN_ILLUM);
-            _mSky.setUniformValue("uCloudCoverage", 0.42);
+            _mSky.setUniformValue("uSunColor", _sunCol);
+            _mSky.setUniformValue("uSunIllum", _sunIllum);
+            _mSky.setUniformValue("uCloudCoverage", _params.cloudCoverage);
             _mSky.setUniformValue("uTransLut", _transLut);
             _mSky.setUniformValue("uSkyView", _skyLut);
+            // The terrain keeps its own copy of the sun (it is drawn in two scenes, so
+            // its uniforms are set once outside the per-frame water path).
+            _mTerrain.setUniformValue("uSunDir", [_sunX, _sunY, _sunZ]);
+            _mTerrain.setUniformValue("uSunColor", _sunCol);
         }
 
         // Rayleigh / Mie / ozone coefficients in 1/km, Hillaire's measured set. Set per
@@ -497,10 +612,15 @@ package
             // WAVE SCALE (1), not the wind speed: with the wind speed there the sea
             // came out ~11x too steep, which is what turned the surface into a lattice
             // of near-vertical facets.
-            var wind:Array = jonswapParams(WIND_SPEED, 120.0);
-            var swell:Array = jonswapParams(SWELL_SPEED, 900.0);
-            var specA:Array = [[1.0, WIND_ANGLE, 0.85, 0.25],
-                               [0.7, WIND_ANGLE - 0.9, 1.0, 1.0]];
+            //
+            // Directions are degrees in the panel and radians in the spectrum, which is
+            // the same conversion the reference makes at its single call site
+            // (`MathUtils.degToRad(p.windDirection)`).
+            var p:OceanParams = _params;
+            var wind:Array = jonswapParams(p.windSpeed, p.fetchKm);
+            var swell:Array = jonswapParams(SWELL_SPEED, SWELL_FETCH_KM);
+            var specA:Array = [[p.waveScale, p.windDirection * DEG2RAD, p.spreadBlend, 0.25],
+                               [p.swellScale, p.swellDirection * DEG2RAD, 1.0, 1.0]];
             var specB:Array = [[wind[0], wind[1], 3.3, 0.04],
                                [swell[0], swell[1], 3.3, 0.04]];
             // cascade cut frequencies: six wavelengths of the next cascade's tile, so
@@ -522,7 +642,10 @@ package
             }
 
             _mEvolve.setUniformValue("uLength", [P0, P1, P2, P3]);
-            _mAssemble.setUniformValue("uLambda", CHOPPINESS);
+            // Choppiness is a live uniform (see simulate()), but it has to be right
+            // before the first assemble, which happens before applyParams() has run
+            // on some frames.
+            _mAssemble.setUniformValue("uLambda", p.choppiness);
             _mAssemble.setUniformValue("uFoamRecovery", 0.45);
         }
 
@@ -563,6 +686,10 @@ package
                 _mAssemble.setUniformValue("uIn1", src[1]);
                 _mAssemble.setUniformValue("uPrev", prev);
                 _mAssemble.setUniformValue("uDt", dt);
+                // Choppiness is a uniform of the assemble pass, so the panel's slider is
+                // live without a re-bake (the reference does the same: `uLambda` is set
+                // from params on every update, not only when the spectrum is dirty).
+                _mAssemble.setUniformValue("uLambda", _params.choppiness);
                 this.pass(_mAssemble, [cur, _slope[c]], null);
 
                 // the water vertex program derives its roughness from the slope chain's
@@ -634,8 +761,22 @@ package
             // A frozen frame must be bit-identical run to run, so the wave/foam
             // accumulator stops too: uDt is part of the simulation state.
             if (FREEZE_AT >= 0 && _frames >= FREEZE_AT) dt = 0;
-            this.updateCamera();
-            this.simulate(dt);
+            _draws = 0;
+
+            // 1. the camera. A named view installs its own camera (and its own sun,
+            //    like the reference's `views`), the demo's loop animates.
+            this.applyView();
+            // 2. the panel. Before simulate(), because a sun edit re-bakes the LUTs the
+            //    water and sky read and a wave edit re-bakes the spectra the FFT reads.
+            this.applyParams();
+            // 3. the sea state's own clock: timeScale scales the SIMULATION, not the
+            //    demo's camera loop (the reference does the same: `dt *= timeScale`
+            //    inside OceanSim.update).
+            var simDt:Number = dt * _params.timeScale;
+            if (simDt > 0.2) simDt = 0.2;
+
+            if (this.isAutoCamera()) this.updateCamera();
+            this.simulate(simDt);
             this.buildCaustics();
             this.drawReflection();
             this.drawOpaque();
@@ -644,6 +785,228 @@ package
             this.drawUnderwater();
             this.drawComposite();
             _frames++;
+        }
+
+        // ------------------------------------------------------------------
+        // Panel parameters -> uniforms / bakes
+        // ------------------------------------------------------------------
+
+        // Sun vector + radiance from the panel's elevation/azimuth/intensity. Cheap, so
+        // it is called whenever something that depends on it needs it rather than
+        // stored.
+        private function updateSun():void
+        {
+            var el:Number = _params.sunElevation * DEG2RAD;
+            var az:Number = _params.sunAzimuth * DEG2RAD;
+            var ce:Number = Math.cos(el);
+            _sunX = ce * Math.sin(az);
+            _sunY = Math.sin(el);
+            _sunZ = ce * Math.cos(az);
+            var k:Number = _params.sunIntensity / SUN_INTENSITY_REF;
+            this._sunCol[0] = SUNCOL_REF[0] * k;
+            this._sunCol[1] = SUNCOL_REF[1] * k;
+            this._sunCol[2] = SUNCOL_REF[2] * k;
+            this._sunIllum = Math.PI * SUN_INTENSITY_REF * k;
+        }
+
+        // Record the values the bakes were made from. Called after the initial bakes and
+        // at the end of applyParams(), so "changed" means "changed since the last bake"
+        // and not "differs from a constant".
+        private function markParamsApplied():void
+        {
+            var p:OceanParams = _params;
+            _appliedElev = p.sunElevation;
+            _appliedAzim = p.sunAzimuth;
+            _appliedSunI = p.sunIntensity;
+            _appliedCloud = p.cloudCoverage;
+            _appliedWindSpeed = p.windSpeed;
+            _appliedWindDir = p.windDirection;
+            _appliedFetch = p.fetchKm;
+            _appliedWaveScale = p.waveScale;
+            _appliedSpread = p.spreadBlend;
+            _appliedSwellScale = p.swellScale;
+            _appliedSwellDir = p.swellDirection;
+        }
+
+        // The single reader of the panel's model. Two kinds of work:
+        //   * BAKES -- the atmosphere LUTs (sun/cloud) and the JONSWAP spectra (sea
+        //     state). Keyed off the last applied values, so a drag re-bakes once per
+        //     frame it actually moved.
+        //   * UNIFORMS -- water optics, absorption, exposure, choppiness. Pushed every
+        //     frame from the model, which is why there is no "dirty" flag to fall out of
+        //     sync: the draw* methods read `_params` directly.
+        private function applyParams():void
+        {
+            var p:OceanParams = _params;
+
+            var sunMoved:Boolean = (p.sunElevation != _appliedElev ||
+                                    p.sunAzimuth != _appliedAzim ||
+                                    p.sunIntensity != _appliedSunI);
+            if (sunMoved) this.updateSun();
+            var sunDirty:Boolean = sunMoved || (p.cloudCoverage != _appliedCloud);
+
+            var seaMoved:Boolean = (p.windSpeed != _appliedWindSpeed ||
+                                    p.windDirection != _appliedWindDir ||
+                                    p.fetchKm != _appliedFetch ||
+                                    p.waveScale != _appliedWaveScale ||
+                                    p.spreadBlend != _appliedSpread ||
+                                    p.swellScale != _appliedSwellScale ||
+                                    p.swellDirection != _appliedSwellDir);
+
+            this.markParamsApplied();
+            if (sunDirty) this.bakeAtmosphere();
+            if (seaMoved) this.bakeSpectra();
+        }
+
+        // ------------------------------------------------------------------
+        // Named cameras (the reference's «views» menu)
+        // ------------------------------------------------------------------
+
+        private function isAutoCamera():Boolean
+        {
+            return _params.view == 0;
+        }
+
+        // The reference's seven views, same order, same sun per view. They are
+        // ONE-SHOT: applied when the selection changes, then left alone (lil-gui's
+        // onChange behaves the same way -- it moves the camera once).
+        //
+        // The geometry is the port's own: the reference walks an islandHeight() field
+        // from the origin; this demo has seabedH() and three island cones, and
+        // `coast()` below is the same "walk out until the height comes up" rule.
+        private function applyView():void
+        {
+            var v:int = _params.view;
+            if (v == _viewApplied) return;
+            _viewApplied = v;
+            if (v == 0)
+            {
+                // Back to the loop: it re-installs the camera every frame anyway, and
+                // the sun is left as the user set it (a view switch is not a reset).
+                return;
+            }
+
+            var p:OceanParams = _params;
+            var bearing:Number, c:Array, b:Number;
+            if (v == 1)             // Golden hour
+            {
+                this.setSunFromView(3.5, 205.0);
+                bearing = p.sunAzimuth * DEG2RAD;
+                c = this.coast(p.sunAzimuth + 18.0);
+                // relative to the SHORE POINT, offset along the sun's bearing (the
+                // reference's `c.x + cos(b)*120`), so the sun road is in frame
+                this.placeCamera(c[0] + Math.cos(bearing) * 120.0, 5.0,
+                                 c[1] + Math.sin(bearing) * 120.0,
+                                 c[0] + Math.cos(bearing) * 400.0, 0.0,
+                                 c[1] + Math.sin(bearing) * 400.0);
+            }
+            else if (v == 2)        // Breakers
+            {
+                this.setSunFromView(22.0, 205.0);
+                c = this.coast(p.sunAzimuth + 1.9 / DEG2RAD);
+                // stand on the shore, 35 m back and 40 m to the side, looking along it
+                b = c[2] * DEG2RAD;
+                this.placeCamera(c[0] + Math.cos(b) * 35.0 + Math.sin(b) * 40.0, 3.2,
+                                 c[1] + Math.sin(b) * 35.0 - Math.cos(b) * 40.0,
+                                 c[0] - Math.sin(b) * 30.0, 0.0,
+                                 c[1] + Math.cos(b) * 30.0);
+            }
+            else if (v == 3)        // Lagoon
+            {
+                this.setSunFromView(52.0, 205.0);
+                c = this.coast(p.sunAzimuth + 180.0);
+                // inside the lagoon, looking out at the island it belongs to
+                this.placeCamera(c[0] * 0.86, 28.0, c[1] * 0.86,
+                                 c[0] * 1.25, 0.0, c[1] * 1.25);
+            }
+            else if (v == 4)        // Open ocean
+            {
+                this.setSunFromView(14.0, 205.0);
+                b = p.sunAzimuth * DEG2RAD + 0.5;
+                this.placeCamera(Math.cos(b) * 1500.0, 9.0, Math.sin(b) * 1500.0,
+                                 Math.cos(b) * 2400.0, 0.0, Math.sin(b) * 2400.0 + 600.0);
+            }
+            else if (v == 5)        // Aerial
+            {
+                this.setSunFromView(30.0, 205.0);
+                this.placeCamera(900.0, 420.0, 900.0, 0.0, 0.0, 0.0);
+            }
+            else                    // Underwater
+            {
+                this.setSunFromView(48.0, 205.0);
+                b = p.sunAzimuth * DEG2RAD + Math.PI + 0.3;
+                var r:Number = 200.0;
+                while (r < 1000.0 && this.seabedH(Math.cos(b) * r, Math.sin(b) * r) > -9.0) r = r + 2.0;
+                var x:Number = Math.cos(b) * r;
+                var z:Number = Math.sin(b) * r;
+                this.placeCamera(x, -3.2, z,
+                                 x - Math.cos(b) * 25.0, -1.8, z - Math.sin(b) * 25.0);
+            }
+            _underwater = _camera.position.y < 0.0;
+            // The view is the model's SECOND writer: it moves the sun, which the
+            // panel's sliders display. A widget-driven change re-describes itself; this
+            // one has to say so, or the elevation slider keeps pointing at the previous
+            // view's sun until the next click anywhere (measured: Lagoon selected, sun
+            // 52 deg applied, slider still at 70).
+            if (_ui != null) _ui.invalidate(Dirty.ALL);
+        }
+
+        // A view carries a sun, exactly like the reference's `setSun(...)` calls inside
+        // each view. The bakes are picked up by applyParams() on the same frame.
+        private function setSunFromView(elevation:Number, azimuth:Number):void
+        {
+            _params.sunElevation = elevation;
+            _params.sunAzimuth = azimuth;
+        }
+
+        private function placeCamera(x:Number, y:Number, z:Number,
+                                     tx:Number, ty:Number, tz:Number):void
+        {
+            _camera.position.set(x, y, z);
+            _camera.lookAt(tx, ty, tz);
+            _camera.updateMatrixWorld(true);
+            _camera.updateMatrixWorldInverse();
+        }
+
+        // Walk out along a bearing until the seabed rises above the waterline: the
+        // reference's `coast()`, against this demo's height field. Returns
+        // [x, z, bearingDeg].
+        //
+        // WHY IT SWEEPS. The reference's height field is ONE island, so a ray in
+        // almost any direction meets its shore and the single-ray loop is enough.
+        // This demo's field is a lagoon with three separate cones (r 70..120 m at
+        // 200..400 m), so the requested bearing usually misses all three: the loop
+        // then returns its 800 m limit, which put the Lagoon view 725 m out over open
+        // water with no land in frame at all (measured in the window, not inferred).
+        // So the search widens the bearing in 5 deg steps, nearest deviation first,
+        // and returns the bearing it actually hit -- the callers that place a camera
+        // relative to the shore use THAT bearing (c[2]), not the one they asked for.
+        //
+        // Cost: worst case 73 rays x 350 steps, and only when a view is selected.
+        private function coast(bearingDeg:Number):Array
+        {
+            var delta:int = 0;
+            while (delta <= 180)
+            {
+                var side:int = 1;
+                while (side >= -1)
+                {
+                    var a:Number = (bearingDeg + delta * side) * DEG2RAD;
+                    var r:Number = 100.0;
+                    while (r < 800.0 && this.seabedH(Math.cos(a) * r, Math.sin(a) * r) <= 0.0)
+                    {
+                        r = r + 2.0;
+                    }
+                    if (r < 800.0) return [Math.cos(a) * r, Math.sin(a) * r, bearingDeg + delta * side];
+                    if (delta == 0) break;   // +0 and -0 are the same ray
+                    side = side - 2;
+                }
+                delta = delta + 5;
+            }
+            // No land anywhere: the reference's own fallback (its limit), so a view
+            // still gets a finite camera instead of a NaN.
+            var f:Number = bearingDeg * DEG2RAD;
+            return [Math.cos(f) * 800.0, Math.sin(f) * 800.0, bearingDeg];
         }
 
         // A 26 s loop that spends 10 s of it UNDER the surface, so both halves of the
@@ -671,7 +1034,7 @@ package
             // reference's golden-hour camera does the same, and it is why the water shows
             // a glitter road. Orbiting away from the sun gives a dark, mirror-like sea
             // with no highlights at all, however correct the shading maths is.
-            var a:Number = SUN_AZIM + Math.PI + 0.04 + Math.sin(phase * 0.09) * 0.05;
+            var a:Number = _params.sunAzimuth * DEG2RAD + Math.PI + 0.04 + Math.sin(phase * 0.09) * 0.05;
             _camera.position.set(Math.sin(a) * dist, height, Math.cos(a) * dist);
             if (_underwater) _camera.lookAt(0, 8.0, 0);
             else _camera.lookAt(0, 5.2, 0);   // near level: horizon just above centre
@@ -685,6 +1048,13 @@ package
         // reflection rotates the wrong way.
         private function drawReflection():void
         {
+            // Reflections off is a real switch, not a black overlay: the pass (two
+            // draws + a mip chain over a half-res target) is skipped and the water
+            // samples a 1x1 black stand-in -- the program always samples uReflection,
+            // and an unbound sampler in a Metal draw is a validation failure that
+            // writes nothing.
+            if (!_params.reflections) return;
+
             var e:Vector.<Number> = _camera.matrixWorld.elements;
             var me:Vector.<Number> = _mirror.matrix.elements;
             var r:int, c:int;
@@ -710,7 +1080,7 @@ package
             _mSky.setUniformValue("uAlpha", 1e4);
             _mTerrain.setUniformValue("uReflPass", 0.0);
             _fnMips(_refl);
-
+            _draws = _draws + _nr.drawCalls;
         }
 
         // Sky + terrain into _opaque. Alpha is the pass's linear view depth: the water and
@@ -732,7 +1102,15 @@ package
             _mSky.setUniformValue("uRayFwd", [-ce[8], -ce[9], -ce[10]]);
             _mSky.setUniformValue("uRayRight", [ce[0] * tanX, ce[1] * tanX, ce[2] * tanX]);
             _mSky.setUniformValue("uRayUp", [ce[4] * tanY, ce[5] * tanY, ce[6] * tanY]);
+            // NOT uAbsorption/uScatterColor here: terrain.frag DECLARES both and uses
+            // neither (the seabed is absorbed by the water and composite passes, which
+            // read it as a texture), so the reflection drops them and setting them here
+            // only earned one "material.uniforms carries 'uAbsorption' but the program
+            // does not declare it" warning per run. The warning was right, the code was
+            // not -- and the panel's water colour still reaches the seabed, through the
+            // passes that actually do the absorbing.
             _nr.render(_scene, _camera);
+            _draws = _draws + _nr.drawCalls;
         }
 
         private function drawWater():void
@@ -747,35 +1125,44 @@ package
             m.setUniformValue("uSlope2", _slope[2]);
             m.setUniformValue("uSlope3", _slope[3]);
             m.setUniformValue("uOpaque", _opaque);
-            m.setUniformValue("uReflection", _refl);
+            m.setUniformValue("uReflection", this.reflectionTexture());
             m.setUniformValue("uLength", [P0, P1, P2, P3]);
             // Roughness/refraction/distortion/fog straight from OceanSurface.js: 0.02 is
             // the reference's base roughness (0.055 was smooth enough to hide the sun's
-            // road), and 1/18000 is its aerial-perspective density.
-            m.setUniformValue("uOptics", [0.02, 0.06, 0.04, 1.0 / 18000.0]);
-            m.setUniformValue("uFoam", [0.05, 1.3, 0.35, 0.85]);
+            // road), and 1/18000 is its aerial-perspective density. The first three are
+            // panel parameters (the web GUI's Water folder); the fourth is not exposed
+            // there either.
+            var p:OceanParams = _params;
+            m.setUniformValue("uOptics", [p.roughness, p.refraction, p.reflectionDistort,
+                                          1.0 / 18000.0]);
+            m.setUniformValue("uFoam", [p.foamBias, p.foamScale, 0.35, 0.85]);
             m.setUniformValue("uSunDir", [_sunX, _sunY, _sunZ]);
-            m.setUniformValue("uSunColor", SUNCOL);
-            m.setUniformValue("uAbsorption", ABSORB);
-            m.setUniformValue("uScatterColor", SCATTER);
+            m.setUniformValue("uSunColor", _sunCol);
+            m.setUniformValue("uAbsorption", p.absorption);
+            m.setUniformValue("uScatterColor", p.scatter);
             // The original port lights the body with one flat sky colour; the LUT-driven
             // version that replaced it is not in this file any more (see the header of
             // assets/ocean/water.frag), so the uniform stays a constant.
             m.setUniformValue("uSkyAmbient", [0.32, 0.42, 0.52]);
-            m.setUniformValue("uGlint", 0.6);
+            m.setUniformValue("uGlint", p.glint);
             var f:Vector.<Number> = _camera.matrixWorld.elements;
             m.setUniformValue("uCamForward", [-f[8], -f[9], -f[10]]);
             m.setUniformValue("uCellStep", 6.283185307179586 / 320.0);
-            m.setUniformValue("uWind", WIND_SPEED);
+            m.setUniformValue("uWind", p.windSpeed);
 
             // clear alpha 1 = "no water here": the tag the composite keys on. 0 is the
             // underside and 2 the top, so a cleared pixel cannot be read as a surface.
-            if (!_dbgWaterDescribed) { _dbgWaterDescribed = true; logLine("WATER PROGRAM:\n" + _nr.describeProgram(m)); }
+            if (TRACE_PROGRAMS && !_dbgWaterDescribed)
+            {
+                _dbgWaterDescribed = true;
+                logLine("WATER PROGRAM:\n" + _nr.describeProgram(m));
+            }
             _fnSetTargets([_water], null);
             _context.clear(0, 0, 0, 1, 1, 0, 7);
             _context.setCulling("frontAndBack");   // gl_FrontFacing must be able to differ
             _nr.drawNative(_waterMesh, m);
             _context.setCulling("back");
+            _draws++;
         }
 
         private function drawSpray():void
@@ -797,6 +1184,7 @@ package
             _nr.drawNative(_sprayMesh, m);
             _context.setBlendFactors("one", "zero");
             _context.setCulling("back");
+            _draws++;
         }
 
         // Lens (64x36) decides per pixel whether the near plane is submerged; shafts
@@ -827,7 +1215,7 @@ package
             m.setUniformValue("uCamWorld", _camera.matrixWorld.elements);
             m.setUniformValue("uColor", _opaque);
             m.setUniformValue("uSunDir", [_sunX, _sunY, _sunZ]);
-            m.setUniformValue("uAbsorption", ABSORB);
+            m.setUniformValue("uAbsorption", _params.absorption);
             m.setUniformValue("uUnder", [0.055, 0.9, 42.0, 0.0]);
             m.setUniformValue("uFrame", _frames % 64);
             m.setUniformValue("uCaustics", _causticNear);
@@ -843,13 +1231,17 @@ package
             m.setUniformValue("uSpray", _spray);
             m.setUniformValue("uShafts", _shafts);
             m.setUniformValue("uLens", _lens);
-            m.setUniformValue("uAbsorption", ABSORB);
-            m.setUniformValue("uScatterColor", SCATTER);
-            m.setUniformValue("uSunColor", SUNCOL);
+            m.setUniformValue("uAbsorption", _params.absorption);
+            m.setUniformValue("uScatterColor", _params.scatter);
+            m.setUniformValue("uSunColor", _sunCol);
             m.setUniformValue("uUnder", [0.055, 0.9, 42.0, 0.0]);
-            m.setUniformValue("uExposure", 0.45);
+            m.setUniformValue("uExposure", _params.exposure);
 
-            if (!_dbgDescribed) { _dbgDescribed = true; logLine("COMPOSITE PROGRAM:\n" + _nr.describeProgram(m)); }
+            if (TRACE_PROGRAMS && !_dbgDescribed)
+            {
+                _dbgDescribed = true;
+                logLine("COMPOSITE PROGRAM:\n" + _nr.describeProgram(m));
+            }
             // One composite, straight into the back buffer. An intermediate _final
             // texture plus a copy sampled by the window compositor disagreed with
             // the same texture read back with drawToBitmapData: the window showed
@@ -859,6 +1251,7 @@ package
             _context.setCulling("frontAndBack");
             _nr.drawNative(_quad, m);
             _context.setCulling("back");
+            _draws++;
             if (DUMP_FRAME && _frames == DUMP_AT && !_dumped)
             {
                 _dumped = true;
@@ -933,6 +1326,8 @@ package
             if (colors != null) _fnSetTargets(colors, depth);
             _context.setCulling("frontAndBack");
             _nr.drawNative(_quad, material);
+            _context.setCulling("back");
+            _draws++;
         }
 
         // ------------------------------------------------------------------
@@ -968,6 +1363,22 @@ package
                 if (_quitAt < 0) _quitAt = _frames + 100000;
                 if (_frames >= _quitAt) NativeApplication.nativeApplication.exit();
             }
+        }
+
+        // The HUD's CALLS / TRIS tiles. This demo issues ~86 draws (72 FFT butterflies
+        // + caustics + bakes) and two whole scene renders per frame, so the renderer's
+        // own tally -- which every render() resets -- would report `1`. `_draws` is a
+        // frame-accumulated count instead (reset at the top of updateFrame).
+        override protected function frameDrawCalls():int
+        {
+            return _draws;
+        }
+
+        override protected function frameTriangles():int
+        {
+            // The scene renders report their own triangles; the full-screen passes are
+            // 2 each. Good enough for a bar gauge, and it is not a fake pixel count.
+            return (_renderer == null ? 0 : _renderer.triangles) + _draws * 2;
         }
 
         private function checkAbove():void
@@ -1296,8 +1707,9 @@ package
             var tm:BufferGeometry = this.terrainMesh();
             _mTerrain.setUniformValue("uCaustics", _causticNear);
             _mTerrain.setUniformValue("uCausticsDeep", _causticDeep);
-            _mTerrain.setUniformValue("uSunDir", [_sunX, _sunY, _sunZ]);
-            _mTerrain.setUniformValue("uSunColor", SUNCOL);
+            // uSunDir/uSunColor are set by bakeAtmosphere(), which runs after this and
+            // again on every sun edit: one writer, so the sky and the seabed cannot end
+            // up lit by two different suns.
             _mTerrain.setUniformValue("uSkyView", _skyLut);
             _mTerrain.setUniformValue("uSand", [0.80, 0.64, 0.44]);
             _mTerrain.setUniformValue("uRock", [0.52, 0.47, 0.38]);   // the lagoon floor is sand all the way down; a dark rock albedo put black patches under an otherwise uniform sea
@@ -1352,6 +1764,24 @@ package
         // ------------------------------------------------------------------
         // Small helpers
         // ------------------------------------------------------------------
+
+        // What the water program samples for its planar reflection: the real half-res
+        // target, or the 1x1 black stand-in when the panel switched reflections off.
+        private function reflectionTexture():Object
+        {
+            return _params.reflections ? _refl : _reflOff;
+        }
+
+        // The internal render size is fixed (RW x RH) and the composite maps it onto the
+        // back buffer, so a resize only reaches the panel: its scroll viewport is sized
+        // from the stage height.
+        override protected function onViewportResize(w:int, h:int):void
+        {
+            if (_panel == null) return;
+            _panel.setStageSize(w, h);
+            _ui.invalidate(Dirty.ALL);
+        }
+
         private function mat(fs:String, vs:String):ShaderMaterial
         {
             var m:ShaderMaterial = new ShaderMaterial();

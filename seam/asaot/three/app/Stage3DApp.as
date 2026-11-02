@@ -33,10 +33,20 @@
 //   override protected function frameRateCap():Number     -- Hz ceiling for THIS
 //                                                            demo (0 = no ceiling,
 //                                                            follow the panel)
+//   override protected function showStats():Boolean        -- false turns the HUD
+//                                                            off (default: on)
 //
 // render() and present() are the host's job -- every demo did exactly that pair
 // in its own ENTER_FRAME handler, and forgetting present() is the classic
 // white-screen bug this host removes by construction.
+//
+// THE STATS HUD IS THE HOST'S TOO (M35). It started in two demos (M15 built it to
+// prove the HUD, M24 re-built the same 5-panel HUD next to a control panel), and
+// that is one HUD per demo re-typed: FPS/MS/MB from stats.js plus CALLS/TRIS from
+// `renderer.info.render`. Every asaot3d demo is a demonstration, so the default is
+// ON -- a screenshot of a demo without a frame rate is a screenshot nobody can
+// argue with -- and `showStats()` is the single switch that turns it off for the
+// one demo that builds its own (M15, whose subject IS the HUD).
 package asaot.three.app
 {
     import flash.display.Sprite;
@@ -54,6 +64,8 @@ package asaot.three.app
     import asaot.three.RendererFactory;
     import asaot.three.cameras.Camera;
     import asaot.three.cameras.PerspectiveCamera;
+    import asaot.three.extras.hud.Stats;
+    import asaot.three.extras.hud.StatsPanel;
     import asaot.three.input.Keyboard;
     import asaot.three.scenes.Scene;
 
@@ -81,6 +93,12 @@ package asaot.three.app
         // Last render failure (reportFrameError), for demos and probes that want
         // to assert a clean frame without watching the window title.
         private var _frameError:Error = null;
+
+        // The HUD, built once the context exists (see buildHud()). Null means "no
+        // HUD": either showStats() said no, or the context was never created.
+        private var _stats:Stats = null;
+        private var _hudCalls:StatsPanel = null;
+        private var _hudTris:StatsPanel = null;
 
         public function Stage3DApp()
         {
@@ -261,6 +279,10 @@ package asaot.three.app
                 {
                     throw new Error("Stage3DApp.createScene() must set _scene and _camera");
                 }
+                // AFTER createScene(), so a demo can tune the bar normalisers (see
+                // hudCallsMax) while building its scene, and so a scene that fails to
+                // build never leaves a HUD counting frames over a black window.
+                buildHud();
             }
             catch (err:Error)
             {
@@ -338,9 +360,39 @@ package asaot.three.app
             // cause) -- and it is the host's job here so no demo can forget it.
             _context.present();
             afterFrame(elapsedMs);
+            // HUD last: stats.js' update() is begin+end, so the interval it prints is
+            // the whole frame -- updateFrame() + render + present + afterFrame().
+            if (_stats != null) this.updateHud();
             // One-frame key edges are cleared last, so updateFrame() AND
             // afterFrame() both see this frame's key presses exactly once.
             if (_keys != null) _keys.endFrame();
+        }
+
+        // ------------------------------------------------------------------
+        // HUD
+        // ------------------------------------------------------------------
+
+        // FPS / MS / MB are stats.js' three panels; CALLS / TRIS are asaot3d's own
+        // (three.js keeps those in `renderer.info.render`). In that order, because
+        // Stats.addPanel appends and a click on the tile cycles through them.
+        //
+        // Top-LEFT, the HUD's default corner: the right-hand side is reserved for a
+        // control panel, the same split every three.js example makes between
+        // stats.js and lil-gui.
+        private function buildHud():void
+        {
+            if (!showStats()) return;
+            _stats = new Stats();
+            _hudCalls = _stats.addPanel(new StatsPanel("CALLS", 0xffff00, 0x222200));
+            _hudTris = _stats.addPanel(new StatsPanel("TRIS", 0xffaa00, 0x201400));
+            addChild(_stats);
+        }
+
+        private function updateHud():void
+        {
+            _stats.update();
+            _hudCalls.update(frameDrawCalls(), hudCallsMax);
+            _hudTris.update(frameTriangles(), hudTrisMax);
         }
 
         // ------------------------------------------------------------------
@@ -381,6 +433,37 @@ package asaot.three.app
             return 0;
         }
 
+        // Show the Stats HUD. TRUE for every demo: they are demonstrations, and the
+        // frame rate is part of what a demonstration shows. The one override is M15,
+        // whose subject is the HUD itself -- it builds its own, so the host's would be
+        // a second tile in the same corner. Overridable rather than a field, for the
+        // same reason frameRateCap() is: this is read from the constructor's init().
+        protected function showStats():Boolean
+        {
+            return true;
+        }
+
+        // What the CALLS / TRIS panels count. The default is the renderer's own
+        // per-render() tally -- correct for a demo that draws its scene once per frame.
+        // A demo that owns the frame (several render() calls plus offscreen passes) must
+        // override this, or the panel reports only whatever the LAST draw left behind,
+        // which for OceanM34 was `1`.
+        protected function frameDrawCalls():int
+        {
+            return _renderer == null ? 0 : _renderer.drawCalls;
+        }
+
+        protected function frameTriangles():int
+        {
+            return _renderer == null ? 0 : _renderer.triangles;
+        }
+
+        // Bar normalisers, i.e. "what fills the tile". A Number, not an int, because
+        // StatsPanel.update takes a Number and divides by it. Demos tune these while
+        // building their scene (they are read after createScene(), never before).
+        protected var hudCallsMax:Number = 40;
+        protected var hudTrisMax:Number = 8000;
+
         // ------------------------------------------------------------------
         // read-only state
         // ------------------------------------------------------------------
@@ -400,6 +483,14 @@ package asaot.three.app
         public function get keys():Keyboard
         {
             return _keys;
+        }
+
+        // The HUD, for a demo that wants to read the numbers it is showing (M34 logs
+        // its cadence) or add a panel of its own. Null until the context exists, and
+        // null forever when showStats() returned false.
+        public function get stats():Stats
+        {
+            return _stats;
         }
 
         // ------------------------------------------------------------------

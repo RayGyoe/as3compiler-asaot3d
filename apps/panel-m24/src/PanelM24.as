@@ -33,7 +33,6 @@ package
     import asaot.three.cameras.PerspectiveCamera;
     import asaot.three.controls.OrbitControls;
     import asaot.three.extras.hud.Stats;
-    import asaot.three.extras.hud.StatsPanel;
     import asaot.three.geometries.BoxGeometry;
     import asaot.three.geometries.PlaneGeometry;
     import asaot.three.lights.AmbientLight;
@@ -58,10 +57,6 @@ package
         private var _view:PanelView;
         private var _ui:UiApp;
 
-        private var _stats:Stats;
-        private var _callsPanel:StatsPanel;
-        private var _trisPanel:StatsPanel;
-
         private var _fog:Fog;
         private var _sun:DirectionalLight;
         private var _controls:OrbitControls;
@@ -82,8 +77,13 @@ package
             this._state = new PanelState();
             this._materials = new Vector.<MeshStandardMaterial>();
 
+            // The Stats HUD (FPS/MS/MB/CALLS/TRIS) is the HOST's since M35: this demo
+            // used to build the same 5-panel HUD by hand. Only its bar normalisers are
+            // scene-specific, and they are read after createScene().
+            hudCallsMax = CALLS_MAX;
+            hudTrisMax = TRIS_MAX;
+
             this.buildScene();
-            this.buildHud();
             this.buildPanel();
 
             logLine("M24 ready: control panel on the right (" + PanelView.PANEL_W +
@@ -184,17 +184,6 @@ package
         }
 
         // ------------------------------------------------------------------
-        // HUD (top-left)
-        // ------------------------------------------------------------------
-        private function buildHud():void
-        {
-            this._stats = new Stats();
-            this._callsPanel = this._stats.addPanel(new StatsPanel("CALLS", 0xffff00, 0x222200));
-            this._trisPanel = this._stats.addPanel(new StatsPanel("TRIS", 0xffaa00, 0x201400));
-            addChild(this._stats);
-        }
-
-        // ------------------------------------------------------------------
         // control panel (right)
         // ------------------------------------------------------------------
         private function buildPanel():void
@@ -281,15 +270,12 @@ package
         override protected function afterFrame(elapsedMs:Number):void
         {
             this._frames++;
-            this._stats.update();
-            this._callsPanel.update(_renderer.drawCalls, CALLS_MAX);
-            this._trisPanel.update(_renderer.triangles, TRIS_MAX);
 
             if (this._frames == 1)
             {
                 logLine("M24 frame 1: drawCalls=" + _renderer.drawCalls +
                     " triangles=" + _renderer.triangles +
-                    " stats x=" + this._stats.panels[0].x +
+                    " stats x=" + stats.panels[0].x +
                     " panelW=" + PanelView.PANEL_W);
             }
             // Once a second: enough to see the scene is alive and that the panel's
@@ -297,8 +283,8 @@ package
             if (this._frames % 60 == 0)
             {
                 logLine("M24 frame " + this._frames +
-                    " fps=" + round3(this._stats.panels[Stats.FPS].value) +
-                    " ms=" + round3(this._stats.panels[Stats.MS].value) +
+                    " fps=" + round3(stats.panels[Stats.FPS].value) +
+                    " ms=" + round3(stats.panels[Stats.MS].value) +
                     " calls=" + _renderer.drawCalls +
                     " tris=" + _renderer.triangles +
                     " fogNear=" + round3(this._state.fogNear) +
