@@ -35,6 +35,8 @@ apps/rotating-cube/RotatingCube
 apps/shader-m30/ShaderM30
 apps/shader-m31/ShaderM31
 apps/ocean-m32/OceanM32
+apps/ocean-m34/OceanM34
+apps/shader-m33/ShaderM33
 apps/texture-maps/TextureMaps
 apps/loader-scene/LoaderScene
 apps/asset-load/AssetLoad

@@ -143,6 +143,7 @@ package asaot.three
 
             var program:Object = entry["program"];
             _native["useProgram"](program);
+            this._applySamplerStates(entry, material);
 
             this._uploadAutoUniforms(entry, mesh, program);
             this._uploadAuthorUniforms(entry, material, program);
@@ -155,8 +156,76 @@ package asaot.three
         }
 
         // ------------------------------------------------------------------
-        // Programs
+        // Sampler state
         // ------------------------------------------------------------------
+        // three.js puts wrap/filter on the TEXTURE; a render target obtained from
+        // Context3DNative.createTexture is a bare TextureBase with nowhere to put them.
+        // So the material carries the table instead: `samplers: { uDisp0: 'repeat',
+        // uSlope1: 'repeat' }`, i.e. only the names that need something other than the
+        // clamp/linear/no-mip default.
+        //
+        // WHY THIS MATTERS. Without it a native sampler gets clamp-to-edge and
+        // MTLMipFilterNotMipmapped (stage3d_glue s3d_native_bind_texture), so a
+        // textureLod(uSlope0, uv, 8.0) -- how a mean-square-slope average is read --
+        // silently returns level 0 and an ocean tile cannot repeat at all. Both are
+        // invisible in a screenshot and fatal to the model, so the state is applied
+        // from the reflection's own unit numbers instead of guessed.
+        //
+        // STATE IS PER (STAGE, UNIT), not per unit: SPIRV-Cross numbers samplers per
+        // stage, so an ocean surface has repeat-wrapped displacement atlases at vertex
+        // unit 0..2 and a clamp-wrapped screen texture at fragment unit 0. Those are
+        // different Metal samplers that merely share a number, so each is configured on
+        // its own stage instead of forcing one mode onto both.
+        private function _applySamplerStates(entry:Object, material:ShaderMaterial):void
+        {
+            var list:Array = entry["texList"];
+            if (list == null) return;
+            var declared:Object = material.samplers != null ? material.samplers : {};
+            var n:int = list.length;
+            for (var i:int = 0; i < n; i++)
+            {
+                var t:Object = list[i];
+                var mode:String = declared[t["name"]] != null ? String(declared[t["name"]]) : "";
+                var stage:int = int(t["stage"]);
+                var unit:int = int(t["slot"]);
+                if (mode == "repeat")
+                    _native["setSamplerStateAtStage"](stage, unit, "repeat", "linear", "linear");
+                else if (mode == "repeat-nearest")
+                    _native["setSamplerStateAtStage"](stage, unit, "repeat", "nearest", "nearest");
+                else
+                    _native["setSamplerStateAtStage"](stage, unit, "clamp", "linear", "none");
+            }
+        }
+
+        // Debug aid: the reflected binding table of a material's program, one line per
+        // binding. Kept because "the uniform is 0" and "the program never declared it"
+        // are indistinguishable from outside, and this answers it in one log line.
+        public function describeProgram(material:ShaderMaterial):String
+        {
+            var entry:Object = _ensureProgram(material);
+            if (entry == null) return "(no program)";
+            var p:Object = entry["program"];
+            if (p == null) return "(no program object)";
+            // A dead program draws nothing and says nothing: the compile log is the only
+            // way to tell "the shader is wrong" apart from "the pass never ran".
+            if (p["ok"] != true) return "(COMPILE FAILED) " + p["infoLog"];
+            if (p["bindingNames"] == null) return "(no reflection)";
+            var names:Array = p["bindingNames"];
+            var kinds:Array = p["bindingKinds"];
+            var slots:Array = p["bindingSlots"];
+            var stages:Array = p["bindingStages"];
+            var bases:Array = p["bindingBaseTypes"];
+            var comps:Array = p["bindingComponents"];
+            var out:String = "";
+            for (var i:int = 0; i < names.length; i++)
+            {
+                out = out + "    " + int(stages == null ? 0 : stages[i]) + "/" + kinds[i] + " slot " +
+                    int(slots[i]) + " base " + int(bases == null ? 0 : bases[i]) + " x" +
+                    int(comps == null ? 1 : comps[i]) + " " + String(names[i]) + "\n";
+            }
+            return out;
+        }
+
         private function _ensureProgram(material:ShaderMaterial):Object
         {
             var entry:Object = _programs[material];
@@ -228,8 +297,11 @@ package asaot.three
             var comps:Array = program["bindingComponents"];
             var bases:Array = program["bindingBaseTypes"];
             var sizes:Array = program["bindingSizes"];
+            var stages:Array = program["bindingStages"];
             var attrs:Object = {};
             var uniforms:Object = {};
+            var textures:Object = {};
+            var texList:Array = [];
             if (names == null) return;
             for (var i:int = 0; i < names.length; i++)
             {
@@ -237,6 +309,15 @@ package asaot.three
                 if (kind == 3)                                 // ASC_SHADER_KIND_ATTRIBUTE
                 {
                     attrs[String(slots[i])] = String(names[i]);
+                }
+                else if (kind == 2)                            // ASC_SHADER_KIND_TEXTURE
+                {
+                    // [name] -> sampler unit. Kept apart from `uniforms` because it is
+                    // the unit -- not the value -- that carries the filter/wrap state
+                    // (see _applySamplerStates).
+                    textures[String(names[i])] = int(slots[i]);
+                    texList.push({ name: String(names[i]), slot: int(slots[i]),
+                                   stage: stages == null ? 0 : int(stages[i]) });
                 }
                 else
                 {
@@ -249,6 +330,8 @@ package asaot.three
             }
             entry["attrs"] = attrs;
             entry["uniforms"] = uniforms;
+            entry["textures"] = textures;
+            entry["texList"] = texList;
         }
 
         // ------------------------------------------------------------------
@@ -307,7 +390,13 @@ package asaot.three
         private function _setUniformIfDeclared(entry:Object, program:Object, name:String, value:*):void
         {
             var spec:Object = (entry != null && entry["uniforms"] != null) ? entry["uniforms"][name] : null;
-            if (spec == null)
+            // Samplers live in their own table (that is where the sampler UNIT is kept),
+            // so "not in `uniforms`" does NOT mean "not declared". Testing only `uniforms`
+            // dropped every texture the material carried -- the bind never happened and
+            // the sample read an unbound unit, which is black, not an error.
+            var units:Object = (entry != null && entry["textures"] != null) ? entry["textures"] : null;
+            var isSampler:Boolean = (spec == null && units != null && units[name] != null);
+            if (spec == null && !isSampler)
             {
                 // The program does not declare it. For an AUTO uniform that is normal
                 // (the shader uses none of them); for an author uniform it is almost
@@ -335,6 +424,14 @@ package asaot.three
             if (value is TextureBase)
             {
                 _native["bindTexture"](program, name, TextureBase(value));
+                return;
+            }
+
+            if (spec == null)
+            {
+                // declared as a sampler but handed something that is not a texture
+                this._warn("s:" + name, "shader sampler '" + name +
+                    "' was given a non-texture value; the unit stays unbound");
                 return;
             }
 

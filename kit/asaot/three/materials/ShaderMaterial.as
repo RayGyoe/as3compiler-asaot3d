@@ -52,6 +52,15 @@ package asaot.three.materials
         // bool in a preprocessor expression.
         public var defines:Object;
 
+        // Sampler state, keyed by uniform NAME, for the samplers that are not
+        // clamp/linear/no-mip. three.js keeps wrap/filter on the Texture; a raw render
+        // target from Context3DNative.createTexture has no Texture wrapper, so the
+        // material carries it here instead. Values: 'repeat' (tiling, mipmapped) and
+        // 'repeat-nearest'; anything else -- or an absent key -- means the channel
+        // default, clamp + linear + no mip filtering. See NativeShaderRenderer
+        // ._applySamplerStates for why an ocean cannot be built without this.
+        public var samplers:Object;
+
         // three.js ShaderMaterial.lights: whether the backend should inject the
         // engine's lighting uniforms. Not implemented by the Metal backend yet --
         // reading it is safe, and a caller that sets it true is told so once by
@@ -65,6 +74,7 @@ package asaot.three.materials
             this.fragmentShader = '';
             this.uniforms = {};
             this.defines = {};
+            this.samplers = {};
             // three.js ShaderMaterial defaults for the two flags whose value is
             // not the Material base default: a shader material is usually a
             // post-process / water / sky pass that writes its own output.
@@ -137,6 +147,7 @@ package asaot.three.materials
         {
             this.uniforms = {};
             this.defines = {};
+            this.samplers = {};
         }
     }
 }
