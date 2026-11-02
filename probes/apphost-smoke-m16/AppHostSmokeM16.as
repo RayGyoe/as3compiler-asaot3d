@@ -54,6 +54,17 @@ check("A5 a negative rate is treated as unknown", near(Stage3DApp.frameRateForRe
 check("A6 NaN is treated as unknown", near(Stage3DApp.frameRateForRefresh(0 / 0), 0));
 check("A7 only the unknown sentinel is 0", Stage3DApp.frameRateForRefresh(1) == 1);
 
+// A8-A12: the demo's own ceiling (capFrameRate). A ceiling is a CAP, not a
+// request to raise: it may lower the application clock below the panel rate
+// (that is the whole point -- a 120 Hz panel otherwise doubles the CPU cost of
+// a frame no one asked to be redrawn), and it may never raise it above the panel.
+check("A8 a 60 ceiling halves a 120 Hz panel", near(Stage3DApp.capFrameRate(120, 60), 60));
+check("A9 a ceiling never raises above the panel", near(Stage3DApp.capFrameRate(60, 120), 60));
+check("A10 a ceiling equal to the panel is a no-op", near(Stage3DApp.capFrameRate(60, 60), 60));
+check("A11 0 means 'no ceiling', not '0 fps'", near(Stage3DApp.capFrameRate(120, 0), 120));
+check("A12 a NaN/negative ceiling is ignored",
+      near(Stage3DApp.capFrameRate(120, 0 / 0), 120) && near(Stage3DApp.capFrameRate(120, -60), 120));
+
 // ---------------------------------------------------------------------------
 // B. Viewport -> projection aspect.
 // ---------------------------------------------------------------------------
@@ -107,5 +118,8 @@ check("D1 constructing the host is safe without a stage", host != null);
 check("D2 no renderer before the context exists", host.renderer == null);
 check("D3 refreshRate is 0 until a panel rate is reported", near(host.refreshRate, 0));
 check("D4 the host is a display object like any demo", host.numChildren == 0);
+// D5: the default must be "no ceiling". A non-zero default here would silently
+// throttle every demo that never asked for one.
+check("D5 the base host asks for no ceiling", near(Stage3DApp.capFrameRate(120, 0), 120));
 
 trace(failed == 0 ? "ALL PASS" : (failed + " FAILED"));

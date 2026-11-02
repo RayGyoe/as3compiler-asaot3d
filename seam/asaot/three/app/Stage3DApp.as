@@ -30,6 +30,9 @@
 //                                                          -- extra resize work
 //                                                            (controls.setSize,
 //                                                             ortho frustum refit)
+//   override protected function frameRateCap():Number     -- Hz ceiling for THIS
+//                                                            demo (0 = no ceiling,
+//                                                            follow the panel)
 //
 // render() and present() are the host's job -- every demo did exactly that pair
 // in its own ENTER_FRAME handler, and forgetting present() is the classic
@@ -98,7 +101,11 @@ package asaot.three.app
             stage.align = StageAlign.TOP_LEFT;
             stage.scaleMode = StageScaleMode.NO_SCALE;
 
-            stage.frameRate = 60;
+            // Pre-handshake value: 60 unless the demo asks for a lower ceiling.
+            // The display-rate sync below replaces it once the panel rate is known,
+            // so this is only what a backend that cannot query the panel keeps.
+            var cap:Number = this.frameRateCap();
+            stage.frameRate = (cap > 0 && cap < 60) ? cap : 60;
             // Explicit, even though it is AIR's default: the display-rate sync
             // below only holds if the pacer is allowed to cap at the panel.
             stage.vsyncEnabled = true;
@@ -164,15 +171,25 @@ package asaot.three.app
             {
             }
 
-            var hz:Number = Stage3DApp.frameRateForRefresh(refresh);
+            var panel:Number = Stage3DApp.frameRateForRefresh(refresh);
             // 0 means "the backend cannot query the panel" -- keep the current
             // application rate rather than writing a fabricated value.
-            if (hz <= 0) return;
+            if (panel <= 0) return;
 
-            _refreshRate = hz;
+            _refreshRate = panel;
+            // The demo's own ceiling wins over the panel rate. Needed because the
+            // pacer is driven by the panel: on a 120 Hz display a demo that only
+            // has to look like a 60 Hz page pays twice the CPU for frames nobody
+            // asked for. frameRate is application-wide, so this also throttles any
+            // other window of the same app -- acceptable for a single-window demo,
+            // and the reason the cap is per-subclass instead of a global default.
+            var cap:Number = this.frameRateCap();
+            var hz:Number = Stage3DApp.capFrameRate(panel, cap);
+
             stage.frameRate = hz;
-            logLine("Stage3DApp: display " + round3(hz) + " Hz -> stage.frameRate=" +
-                    round3(stage.frameRate) + " (vsync " + stage.vsyncEnabled + ")");
+            logLine("Stage3DApp: display " + round3(panel) + " Hz -> stage.frameRate=" +
+                    round3(stage.frameRate) + " (vsync " + stage.vsyncEnabled +
+                    ", cap " + round3(cap) + ")");
         }
 
         // ------------------------------------------------------------------
@@ -347,6 +364,23 @@ package asaot.three.app
             // optional hook
         }
 
+        // Frame-rate ceiling in Hz for this demo, or 0 for "no ceiling".
+        //
+        // The host otherwise runs the application clock at the panel rate (see
+        // section 1 above), which is right for demos whose cost is negligible and
+        // wrong for one that draws dozens of passes per frame: a 120 Hz panel then
+        // buys doubled CPU for no visible benefit. A demo that wants the reference
+        // browser page's cadence overrides this.
+        //
+        // Must stay a method, not a field: init() runs from the base constructor
+        // when the stage already exists, i.e. BEFORE a subclass's field
+        // initializers, so an overriding field would still read 0 here. Returning
+        // a literal (or a constant) is the contract.
+        protected function frameRateCap():Number
+        {
+            return 0;
+        }
+
         // ------------------------------------------------------------------
         // read-only state
         // ------------------------------------------------------------------
@@ -382,6 +416,20 @@ package asaot.three.app
         {
             if (!(refreshRate > 0)) return 0;
             return refreshRate;
+        }
+
+        // The lower of the panel rate and the demo's own ceiling: a ceiling is a
+        // CAP, never a raise, so a 60 Hz ceiling on a 120 Hz panel yields 60 while
+        // a 120 Hz ceiling on a 60 Hz panel still yields 60 (the panel is the hard
+        // limit -- vsync gates it anyway). A ceiling of 0, negative or NaN means
+        // "no ceiling" and must not be read as "0 fps"; the same NaN trap as
+        // frameRateForRefresh, hence the `!(x > 0)` form rather than `x <= 0`.
+        // Pure and stage-free so a headless probe can pin it.
+        public static function capFrameRate(hz:Number, cap:Number):Number
+        {
+            if (!(cap > 0)) return hz;
+            if (!(hz > 0)) return cap;
+            return (hz < cap) ? hz : cap;
         }
 
         // w/h for the projection aspect, with zero-size windows rejected instead

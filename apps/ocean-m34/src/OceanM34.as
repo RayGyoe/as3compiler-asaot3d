@@ -109,6 +109,13 @@ package
         private static const SPRAY_COUNT:int = 2600;
         private static const CHECK_ENABLED:Boolean = true;
 
+        // Application clock ceiling, in Hz. The host otherwise runs the clock at the
+        // panel rate (120 Hz here), which doubled this demo's CPU for frames nobody
+        // asked for: one frame is a 4.6 ms CPU/GPU composite that already looks
+        // complete at 60. 60 Hz is also the cadence the browser reference actually
+        // presents at, so the two become comparable instead of "half the frames".
+        private static const FRAME_RATE_CAP:Number = 60;
+
         // Write the composed frame to temp/m34-frame.ppm once the checks are in. A
         // window capture reads the window server's last snapshot, which goes stale for
         // this demo (the Metal layer presents without an AppKit redraw), so the only
@@ -610,6 +617,15 @@ package
         // ------------------------------------------------------------------
         // The frame
         // ------------------------------------------------------------------
+
+        // 60 Hz, not the panel rate: see FRAME_RATE_CAP. Must be an override that
+        // returns a constant -- the host calls it from init(), which can run from the
+        // base constructor before this class's fields exist.
+        override protected function frameRateCap():Number
+        {
+            return FRAME_RATE_CAP;
+        }
+
         override protected function updateFrame(dt:Number):void
         {
             if (_noChannel) return;
