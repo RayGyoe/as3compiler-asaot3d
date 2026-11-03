@@ -44,9 +44,17 @@ fi
 # dropping paths that begin with an underscore.
 : > site/.nojekyll
 
+# The temporary repo knows no remotes: take the URL from the real checkout instead
+# of adding an alias that could drift from it.
+REMOTE_URL=$(git -C "$ROOT" remote get-url "$REMOTE")
+
 rm -rf "$PUB"
 mkdir -p "$PUB"
 git init --quiet "$PUB"
+# The published branch has a fixed name; `git init` picks main/master, and a local
+# branch is what the refspec below names (gh-pages:gh-pages otherwise matches
+# nothing and the push fails with "src refspec does not match any").
+git -C "$PUB" checkout --quiet -b "$BRANCH"
 # The work tree is site/: `git add -A` from there records exactly the published
 # bytes, with no copy step and no chance of publishing a stale duplicate.
 cd "$PUB"
@@ -69,7 +77,13 @@ fi
 
 # --force is correct here: gh-pages carries one publish commit and nothing else,
 # so there is no history to preserve and no merge to resolve.
-GIT_DIR="$PUB/.git" GIT_WORK_TREE="$ROOT/site" git push --force "$REMOTE" "$BRANCH:$BRANCH" 2>&1 | sed 's/^/  /'
-echo "publish-web: pushed $BRANCH to $REMOTE"
+# Not piped: a pipeline would swallow git's exit status and let a failed push
+# print a success line (it did once).
+if GIT_DIR="$PUB/.git" GIT_WORK_TREE="$ROOT/site" git push --force "$REMOTE_URL" "$BRANCH:$BRANCH"; then
+  echo "publish-web: pushed $BRANCH to $REMOTE"
+else
+  echo "publish-web: PUSH FAILED (the commit is still built in $PUB)" >&2
+  exit 1
+fi
 echo "publish-web: if this is the first publish, enable Pages once:"
 echo "             Settings -> Pages -> Source: Deploy from a branch -> $BRANCH / (root)"
