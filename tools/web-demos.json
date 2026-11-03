@@ -5,12 +5,12 @@
     "renamed demo fails loudly here instead of quietly vanishing from the site.",
     "",
     "`nativeOnly` is the ONE field that marks a demo as unbuildable for the browser.",
-    "It is not a convenience switch: the native-shader demos draw through",
-    "Context3DNative (GLSL ES 3.00 -> SPIR-V -> MSL), and the WebGL2 arm of that",
-    "channel does not exist yet -- the compiler already refuses `--features",
-    "native-shader` with `--target wasm`. Listing the reason (rather than dropping",
-    "the demo) is the point: a visitor should see that the demo exists and why it is",
-    "not here, not silently miss it (AGENTS.md 1.5 -- never degrade quietly)."
+    "It is not a convenience switch, and it is currently EMPTY: Context3DNative has a",
+    "WebGL2 arm that compiles the author's GLSL ES 3.00 directly (driver reflection,",
+    "no glslang/SPIRV-Cross in the wasm build), so the five native-shader demos run in",
+    "the browser too. If a demo ever cannot, list it here WITH the reason: a visitor",
+    "should see that the demo exists and why it is not playable, not silently miss it",
+    "(AGENTS.md 1.5 -- never degrade quietly)."
   ],
   "font": "fonts/Arial.ttf",
   "groups": [
@@ -76,19 +76,14 @@
       "blurb": "M26 · 与参照实现逐像素比对，打印 PARITY 报告后自行退出" },
 
     { "dir": "shader-m30", "title": "原生 GLSL 通道", "group": "shader",
-      "nativeOnly": "绘制走 Context3DNative（GLSL ES 3.00 → SPIR-V → MSL）；WebGL2 侧的通道尚未实现",
       "blurb": "M30 · 手写 GLSL 顶点 / 片段程序经原生通道上屏" },
     { "dir": "shader-m31", "title": "原生通道能力矩阵", "group": "shader",
-      "nativeOnly": "绘制走 Context3DNative；WebGL2 侧的通道尚未实现",
       "blurb": "M31 · FFT 海洋需要的四项后端能力逐条验证" },
     { "dir": "ocean-m32", "title": "FFT 海洋 · 第一片", "group": "shader",
-      "nativeOnly": "绘制走 Context3DNative；WebGL2 侧的通道尚未实现",
       "blurb": "M32 · Ultra-Water 复刻：FFT 波谱、天空 LUT、水面着色" },
     { "dir": "shader-m33", "title": "通道能力审计", "group": "shader",
-      "nativeOnly": "绘制走 Context3DNative；WebGL2 侧的通道尚未实现",
       "blurb": "M33 · 天空与海洋依赖的五项通道能力审计" },
     { "dir": "ocean-m34", "title": "Ultra-Water 完整复刻", "group": "shader",
-      "nativeOnly": "绘制走 Context3DNative；WebGL2 侧的通道尚未实现",
       "blurb": "M34 · 大气 / 焦散 / 光束 / 泛光 / 调色，外加一整块真面板" }
   ]
 }

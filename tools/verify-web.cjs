@@ -276,6 +276,7 @@ const PROBE = `(() => {
     errors: (window.__ascErrors || []).slice(0, 6),
     stdout: out.slice(0, 12),
     tail: out.slice(-6),
+    fails: out.filter((l) => /(^|\\s)FAIL(ED|URE)?\\b/.test(l)).slice(0, 6),
     lines: out.length,
     canvas: (() => { const c = document.querySelector('canvas'); return c ? { w: c.width, h: c.height } : null; })(),
     title: document.title
@@ -310,6 +311,7 @@ async function verifyOne(send, demo) {
     lines: probe.lines,
     canvas: probe.canvas,
     errors: probe.errors,
+    fails: probe.fails || [],
     startup: probe.stdout.filter((l) => !NOISE.test(l)).slice(0, 6),
     tail: probe.tail,
     ms: Date.now() - t0,
@@ -317,10 +319,18 @@ async function verifyOne(send, demo) {
   // What "failed" means, spelled out rather than inferred from one signal:
   //   - the page recorded an uncaught error or an unhandled rejection,
   //   - nothing ever reached stdout (the runtime never got to main()),
-  //   - a loader error was printed (pruned assets, a 404 in the virtual FS).
+  //   - a loader error was printed (pruned assets, a 404 in the virtual FS),
+  //   - the demo's OWN verdict says it failed.
+  // The last one matters most: every app in this repo ends its run with a verdict
+  // ("... OK" / "PASS ..." or "FAILED (n check(s))" / "FAIL ..."), and a demo that
+  // loads, prints 15 lines and then reports FAILED is a broken demo, not a passing
+  // page. Accepting it because "the page loaded" is how shader-m33 and ocean-m34 both
+  // sat in the PASS column while their own checks said otherwise.
   const bad = [];
   if (probe.errors.length) bad.push('page error: ' + probe.errors[0]);
   if (!result.loaded) bad.push('no stdout within ' + WAIT_MS + ' ms');
+  // `fails` comes from the page and is the demo's own verdict (see PROBE).
+  for (const line of result.fails) bad.push('self-check FAIL: ' + line);
   const loadFail = probe.tail.concat(probe.stdout).find((l) => /\b(ioError|#2032|#2044|cannot load|not found|failed to (load|open))\b/i.test(l));
   if (loadFail) bad.push('load error: ' + loadFail);
   // A page whose pixels are one flat colour is a blank page, however chatty its

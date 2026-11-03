@@ -3995,8 +3995,12 @@ demo 侧不手写清单：`apps/<demo>/features` 与 `apps/<demo>/extra-roots` �
 
 ### 37.8 余项（明确登记）
 
-- **M4 Web 直通**：`stage3d_webgl.cc` 把作者 GLSL ES 3.00 原样喂 WebGL2 + `EXT_color_buffer_float`，
-  零交叉编译。目前 `--features native-shader` **只声明 `native` 目标**，wasm 打开会被前置拒绝。
+- ~~**M4 Web 直通**~~ ✅ 2026-11-03：`stage3d_webgl.cc` 把作者 GLSL ES 3.00 原样喂 WebGL2 +
+  `EXT_color_buffer_float`，零交叉编译（wasm 侧不编 `shader_compiler.cc`、不链 glslang/SPIRV-Cross，
+  反射走链接后 program 上的 `glGetActiveUniform`）。`--features native-shader` 现在同时声明 `native`
+  与 `wasm`。三个只在 WebGL2 出现、症状是「编译过、结果错」的坑（槽位必须按 (kind, stage) 编号、
+  采样器上限是 16 而不是 AGAL 的 8、正面朝向要 `glFrontFace` 翻转而不是补全 cull 模式）连同
+  「渲染目标登记表写死 32 项」一起记在 `as3compiler/docs/zh-cn/native-shader.md` §6.11。
 - **M5 D3D12**：`stage3d_d3d.cc` 的浮点 `DXGI_FORMAT` + 原生 HLSL（SPIRV-Cross 那半边库已链好）。
 - **M7 Ultra-Water 对齐**：FFT（MRT 写两张浮点图）→ `textureLod` 顶点位移 → caustics → 大气/水下。
   这一轮只证明了通路，**没有证明海洋**。

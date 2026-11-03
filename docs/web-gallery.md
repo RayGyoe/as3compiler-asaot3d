@@ -22,12 +22,27 @@
 export EMSDK_HOME=../build-tools/emsdk      # 相对写法可以，脚本会自己 resolve 成绝对路径
 node tools/build-web.cjs                 # 全部 -> site/（--jobs 4 默认；--only a,b 只编几个）
 node tools/serve-web.cjs                 # http://127.0.0.1:8990/
-node tools/verify-web.cjs --shots         # 24 页逐个上屏 + 截图到 temp/web-shots/
+node tools/verify-web.cjs --shots         # 29 页逐个上屏 + 截图到 temp/web-shots/
 tools/publish-web.sh --no-build          # 推 gh-pages（--dry-run 只准备提交）
 ```
 
-`site/` 是**构建产物**（约 210 MB wasm），已被 `.gitignore` 排除；发布走 `gh-pages` 分支，
+`site/` 是**构建产物**（约 260 MB wasm），已被 `.gitignore` 排除；发布走 `gh-pages` 分支，
 不进 main 的历史。
+
+### iframe 永远铺满 stage，只等比缩放 demo 自己的 canvas
+
+gallery 里 `<iframe>` 恒为 `100% × 100%`（可用面积的最大值），被缩放的是**demo 页面里的
+`<canvas>`**：按 `canvas.width/height`（物理像素，含 DPR）等比缩到 `min(fw/w, fh/h)`，允许超过 1
+（放大时把 `image-rendering` 从 `pixelated` 换成 `auto`，缩小时保持原样）。理由有两层：
+
+1. **缩放 frame 会让页面跑在一个不存在的视口里**。demo 页是 `body { min-height: 100vh;
+   display: flex }` + 固定逻辑尺寸的 canvas，把 frame 设成 1200×900 再 `transform: scale()`
+   之后，页面量到的视口和真实 stage 无关，指针坐标也得二次换算。
+2. **量尺的时机不能靠猜**。`web_glue` 是在 `main()` 里给 canvas 写内联 CSS 尺寸的；此前
+   gallery 在 `load + 700ms` 量一次就定死，而 3–10 MB 的 wasm 加字体 fetch 经常比 700ms 长，
+   于是量到的是 HTML 默认 300×150，frame 被钉成那个大小且再也不重算——**切换 demo 后窗口很小，
+   手动刷新（命中缓存、`main()` 赢得竞赛）才变大**。现在用 `ResizeObserver` 盯 canvas，并在
+   `load` 后再补两次幂等的重算；`canvas.style.width` 还没被写入时一律不量（那是加载中的默认态）。
 
 ### `EMSDK_HOME` 必须按绝对路径交给 emcc
 
@@ -35,7 +50,7 @@ tools/publish-web.sh --no-build          # 推 gh-pages（--dry-run 只准备提
 「SDK 根 + 版本」记在自己的 cache 里做 sanity 比对，`../build-tools/emsdk` 与解析后的绝对路径
 **指向同一处却拼写不同**，它判定「配置变了」→ 清缓存 + 重写 sanity 戳。并发时就变成四个子进程
 轮流清对方正在写的缓存，emcc 在最后一条 warning 之后**以非零码退出但不打任何 error**：一次
-`--jobs 4` 全量构建 24/24 全 FAIL，日志尾部还停在一句普通的 `-Wparentheses-equality` 上。
+`--jobs 4` 全量构建全 FAIL，日志尾部还停在一句普通的 `-Wparentheses-equality` 上。
 现在传相对路径也不会再触发（脚本自己转绝对），但手敲 emcc 时仍然要注意这一点。
 
 ## 2. 为什么每个 demo 都拷一份到 `temp/web-app/<dir>/`
@@ -59,17 +74,35 @@ wasm 沙箱里没有系统字体，`TextField`（每个 demo 的 stats HUD、M24
 不注入字节就是**空白文字**，而空白文字不会让任何构建失败。`build-web.cjs` 因此改写生成页里的
 `var FONT_URLS = [...];`（断言这个模式存在，避免发射器改名后静默失效），字体在站点根目录只放一份。
 
-## 4. `nativeOnly`：五个 demo 为什么不在这个站上
+## 4. 29/29：`native-shader` 的 WebGL2 直通臂
 
-`web-demos.json` 里 M30/M31/M32/M33/M34 标了 `nativeOnly`：
+本文件早先在这里写着「M30/M31/M32/M33/M34 五个 demo 不能在浏览器上跑，因为 WebGL2 侧的通道尚未实现」。
+**那条判定是错的，已于 2026-11-03 撤回。** 作者写的是 GLSL ES 3.00 源语言，而 GLSL ES 3.00 正是 WebGL2
+的原生着色语言；把它 `GLSL → SPIR-V → MSL` 再放进浏览器，绕的是我们自己的弯。现在：
 
-```
-绘制走 Context3DNative（GLSL ES 3.00 → SPIR-V → MSL）；WebGL2 侧的通道尚未实现
-```
+| | 原生（Metal） | 浏览器（WebGL2） |
+|---|---|---|
+| 编译链 | glslang → SPIR-V → SPIRV-Cross → MSL | 直接 `glCompileShader`（ES 3.00） |
+| 链接工具库 | `vendor/glslang` + `vendor/SPIRV-Cross` | **不链接**（wasm 里没有它们） |
+| 反射 | SPIRV-Cross 资源列表 | 驱动：链接后 program 上的 `glGetActiveUniform` |
 
-这不是「顺手砍掉」：`--features native-shader` 与 `--target wasm` 的组合会被编译器直接**拒绝**
-（`src/build.ts` 有明确的门）。目录表里保留它们并写明原因，gallery 里也照样列出、点开显示这段
-说明——访问者应当看到「这个 demo 存在、为什么不在浏览器上」，而不是默默少五条（AGENTS.md §1.5）。
+`nativeOnly` 字段因此**一个都不剩**，目录表里 29 条全部可玩。规矩没变：哪天真有跑不了的 demo，仍然
+写进 `nativeOnly` 并写明原因（AGENTS.md §1.5：宁可列出来说「为什么不行」，也不许静默少几行）。细节
+（槽位按 (kind, stage) 编号、unit 在两 stage 之间不重叠、`glFrontFace` 必须翻转）见编译器文档
+`as3compiler/docs/zh-cn/native-shader.md` §6.11。
+
+**这次开通道时抓到三个「编译过、结果错」**，都只在 WebGL2 出现，记在这里因为它们是这条通道的常识：
+
+1. **渲染目标登记表写死 32 项**（`S3DRtTex rtTex[32]`）。WebGL2 拿不到 `glGetTexLevelParameteriv`（ES 3.1
+   才有），FBO 尺寸只能靠这张表反查；32 项一满就**静默不登记**，之后每个目标都用**屏幕尺寸**建 FBO ⇒
+   viewport 大四倍、LUT 烘成常数、整幅黑。改成可增长的 `realloc` 表（失败也不吞，打一行）。
+2. **采样器槽位跨 kind 连续编号** ⇒ 采样器落到 slot 8..10，超出采样器表；加上绑定循环按 AGAL 的 8 个
+   纹理寄存器遍历，`ocean-m32` 的 10 个采样器有 2 个永远不绑。两个都修了（按 (kind, stage) 编号；
+   循环到 `S3D_MAX_NATIVE_TEX = 16`，并按「本程序声明了哪些 slot」绑，未绑的采样器读到黑色而不是上一帧
+   的残留贴图）。
+3. **正面朝向要翻转而不是补全剔除模式**：AGAL 顶点级取反裁剪空间 Y，原生程序不取反，同一批三角形绕序
+   相反。补全 cull 模式能救回画面，但 `gl_FrontFacing` 还是反的 —— `ocean-m34` 的水面 pass 把每个片元
+   判成「水面下侧」。`glFrontFace(nativeMode ? GL_CW : GL_CCW)` 一行解决两件事。
 
 ## 5. 验收口径：构建绿色 ≠ 页面上屏
 
@@ -82,8 +115,14 @@ wasm 页面在运行期失败的样子是**一块黑画布**：构建绿灯、HT
 | `window.__ascStdout` | 页面的 `trace()` 全部落到这里；一行都没有 = `main()` 没跑到 |
 | `Stage3DApp frame error:` | 运行期画家错误（着色器编译失败就是走这条，见 §6） |
 | 截图（`--shots`） | 解码 PNG 做颜色普查，少于 3 种颜色 = 空白页 |
+| 页面自报结论 | stdout 里出现 `FAIL`/`FAILED` 行 = 失败，**页面加载成功不算通过** |
 
 外加 `ioError` / `#2032` / `cannot load` 等加载失败文案。
+
+**最后一行是关键**：每个 demo 跑完都会自己下结论（`... OK` / `PASS ...` 或 `FAILED (n check(s))` /
+`FAIL ...`）。只验「页面加载 + 有 stdout」会让一个自检红的 demo 停在 PASS 列 —— `shader-m33`（导数写进
+了被读回着色器覆盖掉的 alpha）与 `ocean-m34`（水面覆盖 0%）都这样漏过网。现在 `verify-web.cjs` 把页面
+里的 `FAIL` 行当作失败，并把它们原样打出来。
 
 **它自带浏览器**：早期版本借用「系统里任何一个开了 DevTools 端口的 Chrome」，结果是受制于别人的
 标签页状态——实测能无限挂住（某个 demo 卡住主线程时 `Runtime.evaluate` 永远不回，而无超时的

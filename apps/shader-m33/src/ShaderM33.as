@@ -89,7 +89,11 @@ package
             "in vec2 vUV;\n" +
             "out vec4 fragColor;\n" +
             "void main() {\n" +
-            "  fragColor = vec4(vUV.x, vUV.y, abs(dFdx(vUV.x)) * 64.0, abs(dFdy(vUV.y)) * 64.0);\n" +
+            // The two derivatives go in R and G: the read-back material drops
+            // ALPHA (it writes vec4(rgb, 1.0)), so a derivative parked in A would
+            // read as 255 on every backend -- a check that passes while proving
+            // nothing. vUV itself is not asserted here, so it does not need a slot.
+            "  fragColor = vec4(abs(dFdx(vUV.x)) * 64.0, abs(dFdy(vUV.y)) * 64.0, 0.0, 1.0);\n" +
             "}\n";
 
         // ---- C: additive blending. Two draws of 0.5 must read 1.0. ----
@@ -218,12 +222,13 @@ package
             var deriv:Object = native["createTexture"](W, H, Context3DTextureFormat.RGBA_HALF_FLOAT, true);
             drawTo(native, [deriv], null, _mDeriv, true);
             var pd:uint = readTarget(native, deriv);
-            var dx:int = (pd >> 16) & 0xFF, dy:int = (pd >> 8) & 0xFF, dw:int = pd & 0xFF;
+            var ddx:int = (pd >> 16) & 0xFF, ddy:int = (pd >> 8) & 0xFF;
             // uv spans 0..1 over W pixels, so |d/dx| = 1/W = 1/64; scaling by 64
             // makes the expectation exactly 1.0 -- and an implementation that
             // returns 0 (no derivatives) or garbage lands nowhere near it.
-            this.check("dFdx/dFdy are live (|ddx|*64=" + dy + " |ddy|*64=" + dw + ")",
-                Math.abs(dy - 255) <= 3 && Math.abs(dw - 255) <= 3);
+            // (Both are read from R and G because the read-back drops alpha.)
+            this.check("dFdx/dFdy are live (|ddx|*64=" + ddx + " |ddy|*64=" + ddy + ")",
+                Math.abs(ddx - 255) <= 3 && Math.abs(ddy - 255) <= 3);
 
             // ------------------------------------------------------------
             // C. additive blending

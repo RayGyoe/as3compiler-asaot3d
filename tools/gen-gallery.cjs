@@ -123,7 +123,7 @@ const html = `<!DOCTYPE html>
   }
   header a.btn:hover, header button:hover { border-color: #33404f; }
   .stage { flex: 1; min-height: 0; position: relative; background: #000; overflow: hidden; }
-  iframe { position: absolute; left: 0; top: 0; width: 100%; height: 100%; border: 0; }
+  iframe { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; display: block; }
   .notice {
     position: absolute; inset: 0; display: none; place-content: center; padding: 40px;
     text-align: center; color: var(--dim); line-height: 1.9;
@@ -206,7 +206,7 @@ function show(dir, push) {
   posEl.textContent = d.ok ? (at >= 0 ? (at + 1) + ' / ' + list.length : '') : '仅原生';
   if (d.ok) {
     notice.classList.remove('show');
-    frame.style.display = 'block';
+    resetFrameBox();
     frame.src = d.dir + '/index.html';
   } else {    // Not a dead link and not a broken page: say exactly why this one is missing.
     frame.removeAttribute('src');
@@ -251,6 +251,17 @@ document.getElementById('q').addEventListener('input', function () {
     g.style.display = any ? 'block' : 'none';
   });
 });
+function resetFrameBox() {
+  // The iframe is always exactly the stage, which is the maximum area the layout
+  // gives it. Nothing about a demo's geometry is scaled here any more: the demo's
+  // own canvas follows its CSS box (data-asc-fill) and the wasm side resizes the
+  // stage to match, so the app re-renders at the real size instead of a fixed
+  // bitmap being stretched by CSS -- see the note at the bottom of this file.
+  frame.style.width = '100%';
+  frame.style.height = '100%';
+  frame.style.display = 'block';
+}
+
 window.addEventListener('hashchange', function () { show(location.hash.slice(1), false); });
 window.addEventListener('keydown', function (ev) {
   if (ev.target.tagName === 'INPUT') return;
@@ -258,34 +269,23 @@ window.addEventListener('keydown', function (ev) {
   if (ev.key === 'ArrowUp' || ev.key === 'k') { ev.preventDefault(); step(-1); }
 });
 
-// Several demos fix their canvas at the size the native screenshots were taken at
-// (panel-m24 / scene-m20 are 1200x900), which is WIDER than the stage area of a
-// 1440-wide window -- unscaled, the demo's own panel hangs off the right edge. So
-// once a page loads, read its canvas size and scale the whole frame down to fit
-// (same origin, so this is just a read). Scaling never goes above 1: enlarging a
-// 640x480 demo would only smear it.
-function fitFrame() {
-  var doc = frame.contentDocument;
-  var canvas = doc && doc.querySelector('canvas');
-  var stageEl = frame.parentElement;
-  if (!canvas || !stageEl) return;
-  var w = canvas.width, h = canvas.height;
-  if (!w || !h) return;
-  var fw = stageEl.clientWidth, fh = stageEl.clientHeight;
-  var k = Math.min(1, fw / w, fh / h);
-  frame.style.width = w + 'px';
-  frame.style.height = h + 'px';
-  frame.style.transformOrigin = 'top left';
-  frame.style.transform = 'scale(' + k + ')';
-  frame.style.left = Math.max(0, (fw - w * k) / 2) + 'px';
-  frame.style.top = Math.max(0, (fh - h * k) / 2) + 'px';
-}
+// WHY THE GALLERY DOES NOT SCALE THE CANVAS ITSELF.
+// The stage is an <iframe> filling the main column, i.e. the largest area the
+// layout offers, and the demo's canvas fills the iframe (the emitted page marks it
+// data-asc-fill). The wasm side treats the canvas box as its window size: it
+// rebuilds the drawable, updates stageWidth/stageHeight and dispatches RESIZE, so
+// a NO_SCALE scene (asaot3d's Stage3DApp) re-lays-out and its Stage3D back buffer
+// follows -- the same thing adl does when its window is resized.
+//
+// The previous version instead froze the canvas at its descriptor size and
+// CSS-scaled it to fit. That is not a resize: the app keeps rendering a small
+// bitmap and the browser stretches it, which is why switching demos left a tiny
+// box (measured before main() had sized the canvas) and why a fitted one looked
+// soft -- and the pointer mapping drifted with every scale factor.
+
 frame.addEventListener('load', function () {
-  fitFrame();
-  // One more beat: the app sizes its canvas during main(), i.e. after load.
-  setTimeout(fitFrame, 700);
+  frame.style.display = 'block';
 });
-window.addEventListener('resize', fitFrame);
 
 show(location.hash.slice(1) || (DEMOS.filter(function (d) { return d.ok; })[0] || {}).dir, false);
 </script>

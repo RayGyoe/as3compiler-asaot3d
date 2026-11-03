@@ -7,10 +7,13 @@
 //      choice cannot be a compile-time constant. A probe on the factory is the
 //      only place that claim is observable.
 //   2. NativeShaderRenderer really carries a Context3DNative, and a GLSL ES 3.00
-//      pair really survives glslang -> SPIR-V -> SPIRV-Cross -> Metal. The
-//      evidence is `ok`, the reflection table, and a translated source that
-//      contains a Metal `[[buffer(N)]]` -- if any link in that chain were fake,
-//      the MSL would not be MSL.
+//      pair really survives the backend's own path: Metal runs glslang -> SPIR-V
+//      -> SPIRV-Cross and the evidence is a translated source containing
+//      `[[buffer(N)]]`; WebGL2 compiles the same text as written and the evidence
+//      is the author's ES 3.00 coming back unchanged. Asserting MSL on web would
+//      demand a cross-compiler that backend does not need (docs/zh-cn/native-
+//      shader.md §5), and asserting nothing there would hide a passthrough that
+//      never happened -- so the checks are chosen by driverInfo.
 //   3. A ShaderMaterial passes through the SCENE WALK (Mesh -> material dispatch)
 //      without throwing. That is the part the C-level probe cannot see: the draw
 //      only reaches the native path because AGALRenderer recognises the material
@@ -151,11 +154,30 @@ package
             this.check("aPos is reflected", names.indexOf("aPos") >= 0);
             this.check("modelViewMatrix is reflected", names.indexOf("modelViewMatrix") >= 0);
 
+            // Which language the linked backend consumes is a property of the BUILD,
+            // and `driverInfo` is the AIR API that answers it. Metal CROSS-COMPILES
+            // (glslang -> SPIR-V -> SPIRV-Cross writes [[buffer(N)]] and renames the
+            // entry point); WebGL2 takes the author's GLSL ES 3.00 AS WRITTEN, so its
+            // "translation" is the source itself. Demanding MSL on the web backend would
+            // be demanding a cross-compiler WebGL2 neither needs nor has -- and asserting
+            // nothing there would be the silent fake this demo exists to prevent.
             var msl:String = native["getTranslatedSource"](program, true);
-            this.check("the vertex translation is Metal", msl != null && msl.indexOf("metal") >= 0);
-            this.check("...with a reflected buffer binding", msl != null && msl.indexOf("[[buffer(") >= 0);
-            this.check("...and the renamed entry point the backend compiles",
-                msl != null && msl.indexOf("vs_main") >= 0);
+            var metal:Boolean = String(_context.driverInfo).indexOf("Metal") >= 0;
+            if (metal)
+            {
+                this.check("the vertex translation is Metal", msl != null && msl.indexOf("metal") >= 0);
+                this.check("...with a reflected buffer binding", msl != null && msl.indexOf("[[buffer(") >= 0);
+                this.check("...and the renamed entry point the backend compiles",
+                    msl != null && msl.indexOf("vs_main") >= 0);
+            }
+            else
+            {
+                this.check("the vertex program is the author's GLSL ES 3.00",
+                    msl != null && msl.indexOf("#version 300 es") >= 0);
+                this.check("...passed through verbatim (declarations intact)",
+                    msl != null && msl.indexOf("layout(location = 0) in vec3 aPos;") >= 0);
+                this.check("...with no Metal binding syntax in it", msl != null && msl.indexOf("[[buffer(") < 0);
+            }
 
             // The negative half of the contract: a source the channel refuses must
             // come back as ok=false with glslang's own text, not an exception and

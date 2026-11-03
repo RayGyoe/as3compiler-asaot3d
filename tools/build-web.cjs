@@ -86,7 +86,30 @@ function readApp(dir) {
       if (line) classPaths.push(line);
     }
   }
-  return { abs, descriptor: descriptors[0], main, classPaths };
+  return { abs, descriptor: descriptors[0], main, classPaths, ...onePerLine(abs) };
+}
+
+// `<demo>/features` and `<demo>/extra-roots`: the same two files tools/build-demo.sh
+// reads for the native build, one value per line, `#` starts a comment. They are read
+// here too, and that is what lets a demo which needs an enhancement build on BOTH
+// backends from one source of truth -- a hard-coded list in this script would drift
+// the moment a demo turns a feature on.
+//
+// `extra-roots` matters specifically for `--air-app`: the native renderer is reached
+// only through a getDefinitionByName STRING (RendererFactory probes for it), so the
+// reachability closure cannot see an edge and would drop the source file. That is the
+// same reason the native build passes it (docs/zh-cn/native-shader.md §6.7).
+function onePerLine(abs) {
+  const list = (name) => {
+    const file = path.join(abs, name);
+    if (!fs.existsSync(file)) return [];
+    return fs
+      .readFileSync(file, 'utf8')
+      .split('\n')
+      .map((l) => l.replace(/#.*$/, '').trim())
+      .filter(Boolean);
+  };
+  return { features: list('features'), extraRoots: list('extra-roots') };
 }
 
 // ---------------------------------------------------------------------- assets
@@ -205,10 +228,12 @@ function buildOne(dir, meta) {
     '--as-class-path', 'seam',
     '--as-class-path', 'kit',
     ...staged.demo.classPaths.flatMap((p) => ['--as-class-path', p]),
-    // The demos' native-shader enhancement has no wasm arm (the compiler refuses it
-    // by name); the web build is therefore the AIR-identical default build, which is
-    // exactly why the five ShaderMaterial demos are catalogued as nativeOnly.
-    '--features', 'none',
+    // Per-demo enhancements, from the demo's own `features` file. `native-shader` is a
+    // real wasm feature now: WebGL2 compiles the author's GLSL ES 3.00 as written and
+    // the reflection comes from the driver, so the web arm links no cross-compiler at
+    // all (as3compiler docs/zh-cn/native-shader.md §5).
+    '--features', staged.demo.features.length ? staged.demo.features.join(',') : 'none',
+    ...(staged.demo.extraRoots.length ? ['--extra-roots', staged.demo.extraRoots.join(',')] : []),
     '--target', 'wasm',
     '--package', 'web',
     '-o', path.relative(ROOT, outBase),
@@ -438,7 +463,29 @@ if (oneIdx >= 0) {
 // The font ships once at the site root (see rewriteFontUrls). A missing font is
 // invisible on the canvas -- text simply renders blank -- so it is checked here
 // rather than left for a human to notice on the published page.
+// `[Embed(source='../../../assets/...')]` resolves against the DECLARING FILE's own
+// directory, so staging has to keep that depth meaningful. An app lives at
+// apps/<demo>/src in the repo and at temp/web-app/<demo>/src here -- both three levels
+// below their root -- so `../../../` lands in temp/ instead of the repo root. One
+// symlink named after the only directory such embeds name (`assets/`) restores the
+// repo's meaning; copying the tree instead would add ~8 MB to every staged demo, and
+// rewriting the paths would make the staged source differ from the shipped one.
+// (The runtime `app:/assets/...` contract is separate and handled by copyAsset.)
+function linkStagedAssets() {
+  const link = path.join(STAGE_APPS, '..', 'assets');
+  const target = path.join(ROOT, 'assets');
+  if (!fs.existsSync(target)) return;
+  let st = null;
+  try { st = fs.lstatSync(link); } catch { /* absent */ }
+  if (st) {
+    if (!st.isSymbolicLink()) return;   // a real dir: somebody staged it on purpose
+    fs.unlinkSync(link);
+  }
+  fs.symlinkSync(target, link, 'dir');
+}
+
 function prepareSiteRoot() {
+  linkStagedAssets();
   if (!fs.existsSync(FONT_SRC)) {
     console.error(
       'build-web: font not found at ' + FONT_SRC + '\n' +
