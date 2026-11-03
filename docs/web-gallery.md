@@ -3,6 +3,9 @@
 > 一句话：`tools/build-web.cjs` 把 `apps/` 里的每个 demo 编成 `site/<dir>/index.html`，
 > `tools/gen-gallery.cjs` 生成左侧列表 + `<iframe>` 的集合页，`tools/verify-web.cjs`
 > 在真浏览器里逐个上屏核对，`tools/publish-web.sh` 推到 `gh-pages`。
+>
+> 线上地址：**https://raygyoe.github.io/as3compiler-asaot3d/**（`gh-pages` 分支，孤儿提交，
+> 每次发布整体替换）。
 
 ## 1. 目录与命令
 

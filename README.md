@@ -57,6 +57,7 @@
 ### 浏览器 gallery（`--target wasm`）
 
 `apps/` 里能上 web 的 demo 可以一次编成静态站点，带左侧列表 + `<iframe>` 切换的集合页：
+**https://raygyoe.github.io/as3compiler-asaot3d/**（24 个可玩 + 5 个仅原生，每页 ~3 MB gzip）
 
 ```bash
 export EMSDK_HOME=../build-tools/emsdk
