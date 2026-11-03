@@ -49,6 +49,15 @@ const demos = catalog.demos.filter((d) => only.length === 0 || only.includes(d.d
 const say = (s) => process.stdout.write(s + '\n');
 const mb = (n) => (n / 1048576).toFixed(2) + ' MB';
 
+// EMSDK_HOME must be ABSOLUTE. emcc compares the SDK root it resolves against the
+// one recorded in its cache and, when they differ by spelling rather than location
+// (`../build-tools/emsdk` vs the resolved path), decides the *configuration changed*
+// -- it then clears the shared cache and rewrites its sanity stamp. Concurrently that
+// is fatal and silent: the four child processes take turns invalidating each other's
+// cache, and emcc exits non-zero after the last warning with no error line at all
+// (measured: 24/24 demos "FAIL" with a log that ends mid-warning).
+if (process.env.EMSDK_HOME) process.env.EMSDK_HOME = path.resolve(ROOT, process.env.EMSDK_HOME);
+
 if (argv.includes('--clean')) {
   for (const d of [outDir, STAGE_APPS]) fs.rmSync(d, { recursive: true, force: true });
 }
@@ -239,11 +248,66 @@ function buildOne(dir, meta) {
   // once at the site root and every page points at it relatively.
   const htmlPath = path.join(path.dirname(outBase), 'index.html');
   rewriteFontUrls(htmlPath, 'FONT_URLS', ['../' + catalog.font]);
+  polishPage(htmlPath, meta);
   const files = fs.readdirSync(path.dirname(outBase));
   result.bytes = files.reduce((n, f) => n + fs.statSync(path.join(path.dirname(outBase), f)).size, 0);
   result.files = files.sort();
   result.wallMs = Date.now() - started;
   return result;
+}
+
+// Two things every generated page needs before it can be published, both of them
+// consequences of the payload size rather than of the program:
+//   * the shell's <title> is literally "index" (it is written by the packager, which
+//     knows nothing about the demo), so a tab, a bookmark and the gallery's
+//     "新窗口" button would all be indistinguishable;
+//   * a demo's wasm is ~8 MB, ~3 MB compressed (a Skia floor, not this demo's code),
+//     so on a slow link the page sits black and silent for seconds. The overlay says
+//     what is loading, and turns into the first page-level error if one arrives —
+//     a spinner that lies is worse than none.
+function polishPage(htmlPath, meta) {
+  let html = fs.readFileSync(htmlPath, 'utf8');
+  const title = meta.title + ' · asaot3d';
+  if (!html.includes('<title>index</title>')) throw new Error('generated page title changed shape: ' + htmlPath);
+  html = html.replace('<title>index</title>', '<title>' + escapeHtml(title) + '</title>');
+
+  const overlay =
+    '<div id="asc-loading"><b>' + escapeHtml(meta.title) + '</b><span id="asc-loading-msg">载入中…（wasm 约 3 MB）</span></div>';
+  if (!html.includes('<canvas id="canvas"')) throw new Error('generated page has no canvas: ' + htmlPath);
+  html = html.replace('<canvas id="canvas"', overlay + '\n<canvas id="canvas"');
+
+  const style =
+    '<style>#asc-loading{position:fixed;inset:0;display:flex;flex-direction:column;gap:10px;' +
+    'align-items:center;justify-content:center;font:15px/1.5 -apple-system,"Helvetica Neue",sans-serif;' +
+    'color:#c9d1d9;background:#0f1115;z-index:9}#asc-loading b{font-size:20px;color:#e6edf3}' +
+    '</style>';
+  html = html.replace('</head>', style + '\n</head>');
+
+  const hook =
+    '<script>\n' +
+    '(function(){\n' +
+    '  var el = document.getElementById("asc-loading"), msg = document.getElementById("asc-loading-msg");\n' +
+    '  var hide = function(){ if (el) el.style.display = "none"; };\n' +
+    // Module exists by now (index.js runs synchronously) but the runtime does not:
+    // emcc reads Module.onRuntimeInitialized at fire time, so wrapping works.
+    '  if (window.Module && Module.onRuntimeInitialized) {\n' +
+    '    var prev = Module.onRuntimeInitialized;\n' +
+    '    Module.onRuntimeInitialized = function(){ hide(); return prev.apply(this, arguments); };\n' +
+    '  } else { hide(); }\n' +
+    // A failed load never reaches the runtime, so report the first captured error
+    // instead of spinning for ever.
+    '  setInterval(function(){\n' +
+    '    if (window.__ascErrors && window.__ascErrors.length) { msg.textContent = window.__ascErrors[0]; msg.style.color = "#f85149"; }\n' +
+    '  }, 1000);\n' +
+    '})();\n' +
+    '</script>\n</body>';
+  if (!html.includes('</body>')) throw new Error('generated page has no </body>: ' + htmlPath);
+  html = html.replace('</body>', hook);
+  fs.writeFileSync(htmlPath, html);
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
 // Replace `var FONT_URLS = [...];` in a generated page. Asserting the pattern exists
@@ -312,11 +376,22 @@ async function run() {
   // catalog says, and a stable report makes two builds diffable.
   const order = new Map(demos.map((d, i) => [d.dir, i]));
   results.sort((a, b) => order.get(a.dir) - order.get(b.dir));
+  // A `--only` run rebuilds a few demos; it must not shrink the site. The report is
+  // what the gallery reads, so entries it did not touch are carried over from the
+  // previous build -- otherwise `--only ocean-m34` leaves a one-item gallery.
+  let reported = results;
+  if (only.length) {
+    const prevPath = path.join(outDir, 'demos.json');
+    const prev = fs.existsSync(prevPath) ? JSON.parse(fs.readFileSync(prevPath, 'utf8')) : { demos: [] };
+    const fresh = new Map(results.map((r) => [r.dir, r]));
+    const keep = new Map((prev.demos || []).map((d) => [d.dir, d]));
+    reported = catalog.demos.map((d) => fresh.get(d.dir) || keep.get(d.dir)).filter(Boolean);
+  }
   const report = {
     generated: new Date().toISOString(),
     font: catalog.font,
     groups: catalog.groups,
-    demos: results,
+    demos: reported,
   };
   fs.writeFileSync(path.join(outDir, 'demos.json'), JSON.stringify(report, null, 2) + '\n');
 
@@ -326,7 +401,7 @@ async function run() {
   say('built ' + ok.length + '/' + results.length + ' demos, ' + mb(total) + ' in ' + outDir);
   // The gallery is not an extra: a directory of pages with no index is not a site,
   // and the index must be regenerated from THIS report or it lists a stale catalog.
-  if (ok.length) {
+  if (reported.some((r) => r.status === 'ok')) {
     execFileSync(process.execPath, [path.join(__dirname, 'gen-gallery.cjs'), '--out', path.relative(ROOT, outDir)], {
       cwd: ROOT,
       stdio: ['ignore', 'inherit', 'inherit'],

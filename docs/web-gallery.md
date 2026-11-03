@@ -16,7 +16,7 @@
 | `tools/publish-web.sh` | 把 `site/` 作为一个 orphan 提交推到 `gh-pages` |
 
 ```bash
-export EMSDK_HOME=../build-tools/emsdk
+export EMSDK_HOME=../build-tools/emsdk      # 相对写法可以，脚本会自己 resolve 成绝对路径
 node tools/build-web.cjs                 # 全部 -> site/（--jobs 4 默认；--only a,b 只编几个）
 node tools/serve-web.cjs                 # http://127.0.0.1:8990/
 node tools/verify-web.cjs --shots         # 24 页逐个上屏 + 截图到 temp/web-shots/
@@ -25,6 +25,15 @@ tools/publish-web.sh --no-build          # 推 gh-pages（--dry-run 只准备提
 
 `site/` 是**构建产物**（约 210 MB wasm），已被 `.gitignore` 排除；发布走 `gh-pages` 分支，
 不进 main 的历史。
+
+### `EMSDK_HOME` 必须按绝对路径交给 emcc
+
+脚本第一件事就是把 `EMSDK_HOME` resolve 成绝对路径，看着多余，其实是踩出来的：emcc 把
+「SDK 根 + 版本」记在自己的 cache 里做 sanity 比对，`../build-tools/emsdk` 与解析后的绝对路径
+**指向同一处却拼写不同**，它判定「配置变了」→ 清缓存 + 重写 sanity 戳。并发时就变成四个子进程
+轮流清对方正在写的缓存，emcc 在最后一条 warning 之后**以非零码退出但不打任何 error**：一次
+`--jobs 4` 全量构建 24/24 全 FAIL，日志尾部还停在一句普通的 `-Wparentheses-equality` 上。
+现在传相对路径也不会再触发（脚本自己转绝对），但手敲 emcc 时仍然要注意这一点。
 
 ## 2. 为什么每个 demo 都拷一份到 `temp/web-app/<dir>/`
 
