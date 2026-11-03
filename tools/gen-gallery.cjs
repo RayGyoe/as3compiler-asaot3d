@@ -122,8 +122,8 @@ const html = `<!DOCTYPE html>
     background: #1b2029; border: 1px solid var(--line); border-radius: 7px; padding: 5px 10px;
   }
   header a.btn:hover, header button:hover { border-color: #33404f; }
-  .stage { flex: 1; min-height: 0; position: relative; background: #000; }
-  iframe { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; }
+  .stage { flex: 1; min-height: 0; position: relative; background: #000; overflow: hidden; }
+  iframe { position: absolute; left: 0; top: 0; width: 100%; height: 100%; border: 0; }
   .notice {
     position: absolute; inset: 0; display: none; place-content: center; padding: 40px;
     text-align: center; color: var(--dim); line-height: 1.9;
@@ -208,8 +208,7 @@ function show(dir, push) {
     notice.classList.remove('show');
     frame.style.display = 'block';
     frame.src = d.dir + '/index.html';
-  } else {
-    // Not a dead link and not a broken page: say exactly why this one is missing.
+  } else {    // Not a dead link and not a broken page: say exactly why this one is missing.
     frame.removeAttribute('src');
     frame.style.display = 'none';
     notice.classList.add('show');
@@ -258,6 +257,35 @@ window.addEventListener('keydown', function (ev) {
   if (ev.key === 'ArrowDown' || ev.key === 'j') { ev.preventDefault(); step(1); }
   if (ev.key === 'ArrowUp' || ev.key === 'k') { ev.preventDefault(); step(-1); }
 });
+
+// Several demos fix their canvas at the size the native screenshots were taken at
+// (panel-m24 / scene-m20 are 1200x900), which is WIDER than the stage area of a
+// 1440-wide window -- unscaled, the demo's own panel hangs off the right edge. So
+// once a page loads, read its canvas size and scale the whole frame down to fit
+// (same origin, so this is just a read). Scaling never goes above 1: enlarging a
+// 640x480 demo would only smear it.
+function fitFrame() {
+  var doc = frame.contentDocument;
+  var canvas = doc && doc.querySelector('canvas');
+  var stageEl = frame.parentElement;
+  if (!canvas || !stageEl) return;
+  var w = canvas.width, h = canvas.height;
+  if (!w || !h) return;
+  var fw = stageEl.clientWidth, fh = stageEl.clientHeight;
+  var k = Math.min(1, fw / w, fh / h);
+  frame.style.width = w + 'px';
+  frame.style.height = h + 'px';
+  frame.style.transformOrigin = 'top left';
+  frame.style.transform = 'scale(' + k + ')';
+  frame.style.left = Math.max(0, (fw - w * k) / 2) + 'px';
+  frame.style.top = Math.max(0, (fh - h * k) / 2) + 'px';
+}
+frame.addEventListener('load', function () {
+  fitFrame();
+  // One more beat: the app sizes its canvas during main(), i.e. after load.
+  setTimeout(fitFrame, 700);
+});
+window.addEventListener('resize', fitFrame);
 
 show(location.hash.slice(1) || (DEMOS.filter(function (d) { return d.ok; })[0] || {}).dir, false);
 </script>
