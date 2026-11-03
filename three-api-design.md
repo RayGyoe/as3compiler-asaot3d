@@ -4471,3 +4471,36 @@ OceanPanelView ──► OceanParams ──► applyView()/applyParams() ──�
   把「已经推过」与「这个目标还没推过」区分开。判据：改档位前后截图差应集中在 1~2 px 宽的
   边缘带上；若差在整块面上，说明 PSO 采样数与本帧附件不匹配。
 
+### 39.19 相机交给指针（D221、R94–R95）
+
+- **D221 相机控制照搬参照，不发明「自由相机」模式**。参照页的相机就是 `OrbitControls`
+  （main.js:44-46：damping 开、`maxDistance 6000`，**没有** minDistance、没有极角/方位限制——
+  正是这两条「没设」让相机能下潜到水下再绕回来）。它的视点菜单只写 `camera.position` +
+  `controls.target`，**没有「manual / free」这一档**；点完菜单再拖，菜单仍指着上一个视点。
+  移植版因此也不加这一项：菜单记的是「上次选的视点」，而「谁写相机」是**每帧的事**，
+  不是 UI 状态，也就不该有 UI。面板不新增旋钮，`OceanParams` 也不新增字段（`viewReq` 不是
+  模式，是请求计数，见下）。
+- **巡航保留，拖一下就位**。26 s 自动环是本 demo 的自检依赖（要在水面上下穿越时取帧），不能删。
+  `OceanM34.detectCameraTakeover()` 把「这一帧的相机位姿与上一帧巡航写的不同」当作接管信号：
+  巡航期间没有第二个人写相机（太阳滑块改的是**下一帧**巡航要写的值，不是当前位置），所以位姿
+  一变只可能是指针干的。好处是不必再挂一套事件监听，且「按下但没动」不会被误判成接管——
+  这与 three.js 同口径（没动就没有变化），松开按钮巡航照旧。
+- **唯一回到巡航的手势是「重选当前视点」**。`OceanParams.viewReq` 是请求计数器，`applyView()`
+  以 `(view, viewReq)` 为幂等键。只认 `view` 的话，相机被拖走后再选「auto loop (26 s)」什么
+  都不会发生——而这恰恰是用户唯一会做的复位手势。`reset()` 因此让它**递增**而不是照抄默认值
+  （no-op 的那个场景恰恰是最常见的：相机被拖走时 `view` 已经是 0、计数器也已经是初值）。
+- **R94**：**指针归谁，由「面的拥有者」回答，不由命中测试回答**。three.js 里 GUI 是 canvas 的
+  兄弟 DOM 元素，指针天然分流；AIR 只有一条显示列表，面板上的按下会冒泡到 `stage` 上的同一个
+  监听器，于是「拖滑块顺手把相机也转了」。`asaot.three.controls.OrbitControls` 因此长了一个
+  `pointerFilter(x, y)` 钩子，在**手势起点**（鼠标按下 / 滚轮）问应用「这个点归不归你」，由
+  `OceanPanelView.blocksPointer()` 按**布局矩形**回答（展开＝最右 `PANEL_W` 像素；折叠＝右上
+  按钮那一块）。为什么不按命中测试：展开的下拉会被 `SelectWidget.liftForPopup` 抬到 stage
+  容器上，早已不是面板的后代；折叠时干脆没有面板盒子，只剩一个按钮。过滤器只在按下那一刻被
+  问，所以**拖到一半离开面板仍然继续控相机**，与浏览器的 pointer capture 同口径。
+- **R95**：**每帧只许一个人写相机**，且互斥点必须是帧内单点。巡航、视点快照、`OrbitControls`
+  三者互斥，写成 `if (isFreeCamera()) updateOrbit(); else updateCamera();`——不能靠各自「看
+  情况跳过」，两处都写就会看到「拖完往回弹一帧」。视点接管时还要 `_haveCruisePose = false`
+  并清掉控制器的阻尼余量（`clearOrbitDamping()`：关 damping 跑一次 `update()`，它就不累积
+  也不应用），否则上一手的滑动量会叠到新机位上。指针接管后仍要过参照的 `clampCamera`：
+  `y >= seabedH(x, z) + 0.8`，可以下潜，但不能穿地。
+

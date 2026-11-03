@@ -73,12 +73,15 @@ package
     import asaot.three.RendererFactory;
     import asaot.three.app.Stage3DApp;
     import asaot.three.cameras.PerspectiveCamera;
+    import asaot.three.controls.OrbitControls;
     import asaot.three.core.BufferAttribute;
     import asaot.three.core.BufferGeometry;
     import asaot.three.geometries.PlaneGeometry;
     import asaot.three.materials.Material;
     import asaot.three.materials.ShaderMaterial;
     import asaot.three.math.Matrix4;
+    import asaot.three.math.Quaternion;
+    import asaot.three.math.Vector3;
     import asaot.three.objects.Mesh;
     import asaot.three.scenes.Scene;
 
@@ -145,6 +148,14 @@ package
         // complete at 60. 60 Hz is also the cadence the browser reference actually
         // presents at, so the two become comparable instead of "half the frames".
         private static const FRAME_RATE_CAP:Number = 60;
+
+        // The camera control's two numbers, both the reference's: `maxDistance = 6000`
+        // (main.js:46) and the ground clearance `islandHeight(x, z) + 0.8`
+        // (main.js:417-421). No minDistance and no polar limits -- the reference
+        // leaves three.js's defaults, which is what lets the camera dive under the
+        // surface and orbit from below.
+        private static const ORBIT_MAX_DISTANCE:Number = 6000.0;
+        private static const CAMERA_FLOOR:Number = 0.8;
 
         // Write the composed frame to temp/m34-frame.ppm once the checks are in. A
         // window capture reads the window server's last snapshot, which goes stale for
@@ -361,6 +372,24 @@ package
         // reinstalled its camera every frame would fight nothing, but it would also
         // make "look around then switch back" impossible to add later).
         private var _viewApplied:int = -1;
+        private var _viewReqApplied:int = -1;
+
+        // THE POINTER-DRIVEN CAMERA. `_controls` is always connected -- the same
+        // arrangement the reference has (main.js:44) -- and `_freeCam` is the cruise
+        // YIELDING to it. There is deliberately no "manual" entry in the camera menu:
+        // the reference's menu only names the last preset, and orbiting afterwards
+        // leaves it there (main.js:217). `_freeCam` is therefore "who writes the
+        // camera this frame", not a mode the UI has to display.
+        private var _controls:OrbitControls;
+        private var _freeCam:Boolean = false;
+
+        // The pose the cruise wrote last frame. Nothing else writes the camera while
+        // the cruise runs, so a pose that differs can only be OrbitControls answering
+        // a drag or a wheel -- which is how a takeover is detected without listening
+        // to the same events twice (see detectCameraTakeover).
+        private var _cruisePos:Vector3 = new Vector3();
+        private var _cruiseQuat:Quaternion = new Quaternion();
+        private var _haveCruisePose:Boolean = false;
 
         // Draws issued this frame, for the HUD's CALLS tile: this demo issues ~80
         // offscreen passes plus two scene renders, and `renderer.drawCalls` only ever
@@ -410,6 +439,7 @@ package
 
             _camera = new PerspectiveCamera(50, Number(_rw) / _rh, 0.5, 12000);
             _camera.position.set(0, 9, 150);
+            this.makeControls();
 
             // The reflection needs its own camera object: `render()` computes a camera's
             // world matrix from its transform, so the mirrored matrix has to be handed
@@ -435,6 +465,35 @@ package
                 N + " FFT, " + _rw + "x" + _rh + " internal; atmosphere + caustics + spray + " +
                 "underwater + planar reflection; " + (18 * 4 + 14) + " passes/frame");
             logLine("ocean-m34 panel: " + _params.describe());
+        }
+
+        // THE CAMERA CONTROL. three.js binds OrbitControls to the canvas
+        // (`renderer.domElement`), where the GUI is a sibling element and never
+        // shares its pointer stream; AIR has one display list, so the panel's
+        // presses bubble into the same stage listener. `pointerFilter` is that
+        // missing separation, answered by the panel's own layout (see
+        // OceanPanelView.blocksPointer and R94).
+        //
+        // Everything else is the reference's configuration, unmodified: damping on
+        // with r187's default factor (main.js:45 never sets one), and a 6 km dolly
+        // ceiling (main.js:46). No minDistance, no polar/azimuth clamps -- three.js's
+        // defaults are what make the underwater views usable.
+        private function makeControls():void
+        {
+            var self:OceanM34 = this;
+            _controls = new OrbitControls(_camera, stage);
+            _controls.enableDamping = true;
+            _controls.maxDistance = ORBIT_MAX_DISTANCE;
+            // The cruise's own aim (see updateCamera), so grabbing the camera during
+            // the loop pivots around what is actually on screen.
+            _controls.target.set(0, 5.2, 0);
+            _controls.setSize(stage.stageWidth, stage.stageHeight);
+            _controls.pointerFilter = function (x:Number, y:Number):Boolean
+            {
+                if (self._panel == null) return true;
+                return !self._panel.blocksPointer(x, y);
+            };
+            _controls.update();
         }
 
         // The asaotui control panel, linked in place (class-paths). Built from
@@ -878,8 +937,10 @@ package
             _draws = 0;
 
             // 1. the camera. A named view installs its own camera (and its own sun,
-            //    like the reference's `views`), the demo's loop animates.
+            //    like the reference's `views`); the cruise animates it until the
+            //    pointer takes over; after that OrbitControls owns it (damping too).
             this.applyView();
+            this.detectCameraTakeover();
             // 2. the panel. Before simulate(), because a sun edit re-bakes the LUTs the
             //    water and sky read and a wave edit re-bakes the spectra the FFT reads.
             this.applyParams();
@@ -889,7 +950,8 @@ package
             var simDt:Number = dt * _params.timeScale;
             if (simDt > 0.2) simDt = 0.2;
 
-            if (this.isAutoCamera()) this.updateCamera();
+            if (this.isFreeCamera()) this.updateOrbit();
+            else this.updateCamera();
             this.simulate(simDt);
             this.buildCaustics();
             this.drawReflection();
@@ -1055,8 +1117,20 @@ package
         private function applyView():void
         {
             var v:int = _params.view;
-            if (v == _viewApplied) return;
+            // The counter is part of the identity: it lets a pick of the entry that is
+            // ALREADY selected still re-apply (that is how the camera is handed back
+            // from an orbit to the cruise -- see OceanParams.viewReq).
+            if (v == _viewApplied && _params.viewReq == _viewReqApplied) return;
             _viewApplied = v;
+            _viewReqApplied = _params.viewReq;
+
+            // A view is an instruction about WHO OWNS the camera: it takes it back
+            // from OrbitControls and drops any damped motion the last gesture left
+            // behind, so the new pose is not nudged by a previous drag.
+            _freeCam = false;
+            _haveCruisePose = false;
+            this.clearOrbitDamping();
+
             if (v == 0)
             {
                 // Back to the loop: it re-installs the camera every frame anyway, and
@@ -1144,6 +1218,12 @@ package
             _camera.lookAt(tx, ty, tz);
             _camera.updateMatrixWorld(true);
             _camera.updateMatrixWorldInverse();
+            // OrbitControls orbits around the view's own aim from now on. The reference
+            // writes both in the same breath in every view (main.js:165-208:
+            // `camera.position.set(...)` + `controls.target.set(...)`), and that pairing
+            // is what makes an orbit after a view pivot on the subject instead of on
+            // wherever the previous view happened to look.
+            if (_controls != null) _controls.target.set(tx, ty, tz);
         }
 
         // Walk out along a bearing until the seabed rises above the waterline: the
@@ -1214,10 +1294,82 @@ package
             // with no highlights at all, however correct the shading maths is.
             var a:Number = _params.sunAzimuth * DEG2RAD + Math.PI + 0.04 + Math.sin(phase * 0.09) * 0.05;
             _camera.position.set(Math.sin(a) * dist, height, Math.cos(a) * dist);
-            if (_underwater) _camera.lookAt(0, 8.0, 0);
-            else _camera.lookAt(0, 5.2, 0);   // near level: horizon just above centre
+            var aimY:Number = _underwater ? 8.0 : 5.2;
+            _camera.lookAt(0, aimY, 0);   // near level: horizon just above centre
             _camera.updateMatrixWorld(true);
             _camera.updateMatrixWorldInverse();
+            // Hand the same aim to the control, so a drag that interrupts the cruise
+            // pivots around the island the cruise was looking at.
+            if (_controls != null) _controls.target.set(0, aimY, 0);
+            // The pose this frame wrote. detectCameraTakeover compares against it.
+            _cruisePos.copy(_camera.position);
+            _cruiseQuat.copy(_camera.quaternion);
+            _haveCruisePose = true;
+        }
+
+        // ---- pointer-owned camera (OrbitControls) -------------------------
+
+        // True when OrbitControls, not the cruise, writes the camera this frame: a
+        // named view is already static (the pointer may orbit around it), and the
+        // cruise steps aside the moment a gesture moves the camera.
+        private function isFreeCamera():Boolean
+        {
+            return _params.view != 0 || _freeCam;
+        }
+
+        // THE CRUISE GIVES WAY TO THE POINTER. Nothing else writes the camera while the
+        // cruise runs -- a sun slider changes what the NEXT cruise frame will write,
+        // not where the camera is now -- so a pose that differs from the one written
+        // last frame can only be OrbitControls answering a drag or a wheel. A plain
+        // click moves nothing and therefore does not steal the camera (three.js: no
+        // move, no change).
+        //
+        // Why not listen for MOUSE_DOWN instead: the press alone is not a decision.
+        // This way "hold the button and let go without moving" leaves the cruise
+        // running, which is what the web does too (its menu is not a mode switch and
+        // its camera does not stop because you clicked the canvas).
+        private function detectCameraTakeover():void
+        {
+            if (_freeCam || !this.isAutoCamera() || !_haveCruisePose || _controls == null) return;
+            var moved:Boolean =
+                _camera.position.distanceToSquared(_cruisePos) > 1e-8 ||
+                8.0 * (1.0 - _camera.quaternion.dot(_cruiseQuat)) > 1e-6;
+            if (!moved) return;
+            _freeCam = true;
+            logLine("ocean-m34 camera: cruise released to OrbitControls");
+        }
+
+        // One frame of pointer-owned camera: the control's own update (it also applies
+        // damping), then the reference's clampCamera -- free to dive, but not through
+        // the seabed (main.js:417-421).
+        private function updateOrbit():void
+        {
+            if (_controls == null) return;
+            _controls.update();
+            var floorY:Number = this.seabedH(_camera.position.x, _camera.position.z) + CAMERA_FLOOR;
+            if (_camera.position.y < floorY)
+            {
+                _camera.position.y = floorY;
+                // Re-aim after the clamp: update() aimed from the pre-clamp position,
+                // and a camera that is 5 m higher is no longer looking at the target.
+                _camera.lookAt(_controls.target.x, _controls.target.y, _controls.target.z);
+            }
+            _camera.updateMatrixWorld(true);
+            _camera.updateMatrixWorldInverse();
+            _underwater = _camera.position.y < 0.0;
+        }
+
+        // Zero the control's pending damping without adding API: with damping off, one
+        // update() applies nothing and clears both accumulators (OrbitControls.update).
+        // Used when a view takes the camera back, so a drag that was still coasting
+        // does not add itself to the new pose.
+        private function clearOrbitDamping():void
+        {
+            if (_controls == null) return;
+            var damping:Boolean = _controls.enableDamping;
+            _controls.enableDamping = false;
+            _controls.update();
+            _controls.enableDamping = damping;
         }
 
         // Mirror about y=0: multiply the world matrix by diag(1,-1,1) on the left, which
@@ -2093,6 +2245,10 @@ package
         // from the stage height.
         override protected function onViewportResize(w:int, h:int):void
         {
+            // The control normalises rotation and pan by the VIEWPORT height (three.js
+            // reads clientHeight), so a resize has to reach it or a drag stops tracking
+            // the pointer.
+            if (_controls != null) _controls.setSize(w, h);
             if (_panel == null) return;
             _panel.setStageSize(w, h);
             _ui.invalidate(Dirty.ALL);

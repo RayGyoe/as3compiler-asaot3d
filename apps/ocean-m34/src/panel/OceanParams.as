@@ -117,6 +117,15 @@ package panel
         // halves); 1.. are the reference's `views` entries, in its GUI order.
         public var view:int = 0;
 
+        // HOW MANY TIMES A VIEW HAS BEEN REQUESTED. `view` alone cannot express
+        // "re-apply the view that is already selected": the cruise (0) is the default
+        // and a drag transfers the camera to OrbitControls without changing the menu,
+        // so clicking "auto loop (26 s)" again has to be able to give it back. The
+        // select increments this on EVERY pick (the widget reports a pick on the row,
+        // not on a value change), and the frame loop re-applies when the counter
+        // moves. It is a request counter, not scene state -- nothing renders it.
+        public var viewReq:int = 0;
+
         // ---- water colour, derived ---------------------------------------
         // `absorption` is what the shaders sample, `absorbBase` is the preset's own
         // value before `clarity` divides it (main.js: `absorption.copy(base)
@@ -456,6 +465,12 @@ package panel
             this.msaa = d.msaa;
             this.reflections = d.reflections;
             this.view = d.view;
+            // NOT a copy of the default, an INCREMENT. A Reset is the user's way of
+            // saying "put the camera back", and it has to work in the one case where
+            // nothing else moved: the camera is free (a drag took it) while `view` is
+            // already 0 and the counter is already at its default. Copying 0 there
+            // leaves the epoch unchanged, so applyView() would see no request at all.
+            this.viewReq = this.viewReq + 1;
             this.absorbBase[0] = d.absorbBase[0];
             this.absorbBase[1] = d.absorbBase[1];
             this.absorbBase[2] = d.absorbBase[2];

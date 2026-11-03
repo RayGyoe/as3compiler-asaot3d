@@ -180,6 +180,20 @@ check("D8 there are seven camera views, the first being the demo's own loop",
     OceanParams.VIEWS.length == 7 && OceanParams.VIEWS[0] == "auto loop (26 s)" &&
     OceanParams.VIEWS[6] == "Underwater");
 
+// The view REQUEST counter. `view` says which camera is wanted; the counter says
+// "apply it again", which is what lets a pick of the entry already shown hand the
+// camera back to the cruise after an orbit (applyView keys on both). It must start
+// at zero, move only when the panel asks, and reset with everything else -- a Reset
+// is also a "give the camera back" instruction.
+p = new OceanParams();
+check("D9 the view request counter starts at zero", p.viewReq == 0);
+p.view = 3;
+check("D9b setting the view does not bump the request counter", p.viewReq == 0);
+p.viewReq = p.viewReq + 2;
+p.reset();
+check("D10 reset asks for the default view again instead of copying the counter",
+    p.view == 0 && p.viewReq == 3);
+
 // ---------------------------------------------------------------------------
 // E. reset
 // ---------------------------------------------------------------------------

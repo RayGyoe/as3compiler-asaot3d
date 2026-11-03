@@ -96,6 +96,24 @@ package asaot.three.controls
 
         public var mouseButtons:MouseButtons = new MouseButtons();
 
+        // THE AIR EQUIVALENT OF DOM LAYERING. three.js binds this control to the
+        // canvas (`renderer.domElement`), so a click on a GUI overlay never reaches
+        // it: the panel is a SIBLING element and the browser routes the pointer to
+        // the topmost one. AIR has no such separation -- every display object is a
+        // child of the Stage, and a press on a widget BUBBLES to the Stage listener
+        // this control owns. Left alone, dragging a slider also orbits the camera.
+        //
+        // The hook is consulted before a press or a wheel is accepted, with STAGE
+        // coordinates, and `false` means "an overlay owns this pointer". Null (the
+        // default) accepts everything, which is what every existing demo wants.
+        // M34 is the first caller: `ocean-m34`'s panel answers from its own layout
+        // rect (panel.OceanPanelView.blocksPointer).
+        //
+        // Only the START of a gesture is filtered. A drag that leaves the panel's
+        // rectangle keeps moving the camera, exactly like a pointer capture in the
+        // browser -- otherwise the gesture would die at the panel's edge.
+        public var pointerFilter:Function = null;
+
         // ---- runtime state ----
         public var state:int = NONE;
 
@@ -523,6 +541,7 @@ package asaot.three.controls
         private function _handleMouseDown(e:MouseEvent, right:Boolean):void
         {
             if (!this.enabled) return;
+            if (this.pointerFilter != null && !this.pointerFilter(e.stageX, e.stageY)) return;
 
             var action:int = right ? this.mouseButtons.right : this.mouseButtons.left;
 
@@ -616,6 +635,10 @@ package asaot.three.controls
         private function _handleWheel(e:MouseEvent):void
         {
             if (!this.enabled || !this.enableZoom || this.state != NONE) return;
+            // Same overlay rule as the press: a wheel over the panel scrolls the
+            // panel, it does not dolly the camera (three.js gets this from the
+            // wheel being dispatched to the GUI element instead of the canvas).
+            if (this.pointerFilter != null && !this.pointerFilter(e.stageX, e.stageY)) return;
 
             var deltaY:Number = -e.delta;
             if (deltaY < 0) this._dollyIn(this._getZoomScale(deltaY));

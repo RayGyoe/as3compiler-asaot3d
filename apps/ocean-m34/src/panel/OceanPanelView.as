@@ -64,6 +64,7 @@ package panel
         private var _open:Boolean = true;
 
         private var _stageH:Number = 600;
+        private var _stageW:Number = 960;
 
         // WHICH DROPDOWN IS OPEN, if any (the camera or the water preset).
         //
@@ -83,11 +84,31 @@ package panel
             state.setPreset(state.preset);
         }
 
-        // Called from the app's createScene() and onViewportResize(): the viewport
-        // height is the only input the scroll view needs.
+        // Called from the app's createScene() and onViewportResize(). The height is
+        // what the scroll view needs; the width is what the pointer guard below needs.
         public function setStageSize(w:int, h:int):void
         {
+            this._stageW = w;
             this._stageH = h;
+        }
+
+        // DOES THE PANEL OWN THIS POINTER? Read by `OrbitControls.pointerFilter`, the
+        // AIR stand-in for the DOM layering that keeps three.js's GUI out of the
+        // canvas's pointer stream (see the hook's comment in asaot.three.controls).
+        //
+        // It answers from LAYOUT, not from a hit test on a display object, for two
+        // reasons: an open dropdown is hoisted straight onto the stage container
+        // (SelectWidget.liftForPopup) so it is not a descendant of the panel box, and
+        // the collapsed state has no panel box at all -- only its 76 px button in the
+        // top-right corner. A rectangle is the one rule that covers both.
+        //
+        // The panel is full-height and right-aligned (see render()), so the open case
+        // is the rightmost PANEL_W pixels; the collapsed case is that same corner,
+        // generously boxed around the button.
+        public function blocksPointer(x:Number, y:Number):Boolean
+        {
+            if (!this._open) return x >= this._stageW - 96.0 && y <= 56.0;
+            return x >= this._stageW - PANEL_W;
         }
 
         public override function render():Node
@@ -208,11 +229,23 @@ package panel
                              onSelect: function (i:int):void
                              {
                                  p.view = i;
+                                 // Bump the request counter on every pick, not only on a
+                                 // value change: picking the entry that is already shown
+                                 // is how the camera is handed back to the cruise after
+                                 // an orbit (the select reports the row click either way).
+                                 p.viewReq = p.viewReq + 1;
                                  self.setOpen(false, "view");
                                  cb(Dirty.ALL);
                              } }),
+                    // `stable`: the bar gets its own 10px lane, so no slider's
+                    // thumb ends up underneath it. That lane is layout, so every row
+                    // inside is `pct(1)` (NOT `inner`) -- a 276-wide row in a 266-wide
+                    // content box would overflow and grow a horizontal bar, i.e. this
+                    // switch trades one overlap for another unless the rows follow it.
                     scrollView({ key: "sv", size: [inner, viewH],
-                                 scrollbarY: "auto", overscroll: "none",
+                                 scrollbarGutter: "stable",
+                                 scrollbarY: "auto", scrollbarX: "never",
+                                 overscroll: "none",
                                  background: 0x14171E }, body),
                     button({ key: "reset", label: "Reset",
                              onClick: function ():void { p.reset(); cb(Dirty.ALL); } })
@@ -289,7 +322,6 @@ package panel
             var hi:Number = s[3];
             var dec:int = s[4];
             var v:Number = p.valueOf(name);
-            var inner:Number = PANEL_W - 2 * PANEL_PAD;
 
             return slider(s[1] + " " + v.toFixed(dec) + unitOf(name), {
                 key: name,
@@ -300,7 +332,7 @@ package panel
                 // scrollView's per-child min (ScrollViewWidget.measure), which is what
                 // stops a long section from being compressed to fit the viewport
                 // instead of scrolling.
-                size: [inner, SLIDER_H],
+                size: [Length.pct(1), SLIDER_H],
                 // Parameter rows read as SECOND level: the section headers are the
                 // primary structure (11pt dimmer), so the widget's default bold 13pt
                 // label would invert the hierarchy the reference's lil-gui has.
