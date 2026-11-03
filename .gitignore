@@ -72,3 +72,8 @@ apps/*/*.build.json
 # AIR 在 build/ 里），供 `app:/assets/...` 解析。它是构建期产物、且 ln -sfn 落的是
 # 本机绝对路径，入库只会让克隆者拿到一条断链；每次 build.sh 都会重建。
 apps/*/assets
+
+# 浏览器 gallery 的构建产物（tools/build-web.cjs 写、tools/gen-gallery.cjs 索引）。
+# 它是 24 个 demo 的 wasm 打包（约 210 MB），每次都能从源码重建；发布走 gh-pages
+# 分支（tools/publish-web.sh），不入库也不进 main 的提交历史。
+site/
