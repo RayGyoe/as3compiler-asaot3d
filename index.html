@@ -1,0 +1,356 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>asaot3d · 浏览器里的 AS3 复活</title>
+<style>
+  :root {
+    --bg: #0f1115; --side: #14171d; --line: #232832; --text: #dfe3ea;
+    --dim: #8b93a1; --accent: #5aa9ff; --ok: #45d17a;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    background: var(--bg); color: var(--text);
+    font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", sans-serif;
+    display: grid; grid-template-columns: 286px 1fr; overflow: hidden;
+  }
+  aside {
+    background: var(--side); border-right: 1px solid var(--line);
+    display: flex; flex-direction: column; min-height: 0;
+  }
+  .brand { padding: 16px 16px 10px; border-bottom: 1px solid var(--line); }
+  .brand h1 { margin: 0; font-size: 15px; letter-spacing: .2px; }
+  .brand p { margin: 3px 0 0; color: var(--dim); font-size: 12px; }
+  .search { padding: 10px 12px; border-bottom: 1px solid var(--line); }
+  .search input {
+    width: 100%; padding: 7px 10px; border-radius: 7px; border: 1px solid var(--line);
+    background: #0c0e13; color: var(--text); font-size: 13px; outline: none;
+  }
+  .search input:focus { border-color: var(--accent); }
+  nav { overflow: auto; padding: 8px 8px 24px; flex: 1; min-height: 0; }
+  .group-title {
+    color: var(--dim); font-size: 11px; text-transform: none; letter-spacing: .4px;
+    padding: 12px 8px 5px; position: sticky; top: 0; background: var(--side); z-index: 1;
+  }
+  .item {
+    display: block; padding: 7px 9px; border-radius: 7px; text-decoration: none;
+    color: var(--text); border: 1px solid transparent;
+  }
+  .item:hover { background: #1b2029; }
+  .item.active { background: #1d2733; border-color: #2b3a4d; }
+  .item .name { display: flex; align-items: center; gap: 6px; font-size: 13px; }
+  .item .meta { display: block; color: var(--dim); font-size: 11px; font-variant-numeric: tabular-nums; }
+  .item.off .name { color: var(--dim); }
+  .badge {
+    font-size: 10px; padding: 1px 5px; border-radius: 4px; color: #f0b46a;
+    background: rgba(240, 180, 106, .12); border: 1px solid rgba(240, 180, 106, .3);
+  }
+  main { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+  header {
+    display: flex; align-items: center; gap: 12px; padding: 9px 14px;
+    border-bottom: 1px solid var(--line); background: var(--side);
+  }
+  .titles { min-width: 0; flex: 1; }
+  .titles h2 { margin: 0; font-size: 14px; font-weight: 600; }
+  .titles p { margin: 2px 0 0; color: var(--dim); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  header a.btn, header button {
+    font: inherit; font-size: 12px; color: var(--text); text-decoration: none; cursor: pointer;
+    background: #1b2029; border: 1px solid var(--line); border-radius: 7px; padding: 5px 10px;
+  }
+  header a.btn:hover, header button:hover { border-color: #33404f; }
+  .stage { flex: 1; min-height: 0; position: relative; background: #000; overflow: hidden; }
+  iframe { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; display: block; }
+  .notice {
+    position: absolute; inset: 0; display: none; place-content: center; padding: 40px;
+    text-align: center; color: var(--dim); line-height: 1.9;
+  }
+  .notice.show { display: grid; }
+  .notice strong { color: #f0b46a; display: block; margin-bottom: 6px; font-size: 15px; }
+  .notice code { color: var(--text); background: #1b2029; padding: 1px 5px; border-radius: 4px; }
+  footer { padding: 6px 14px; border-top: 1px solid var(--line); color: var(--dim); font-size: 11px; }
+  @media (max-width: 760px) {
+    body { grid-template-columns: 1fr; grid-template-rows: 45vh 1fr; }
+    aside { border-right: 0; border-bottom: 1px solid var(--line); }
+  }
+</style>
+</head>
+<body>
+<aside>
+  <div class="brand">
+    <h1>asaot3d · 浏览器里的 AS3</h1>
+    <p>29 个 demo 已上屏，0 个仅原生 · 261 MB wasm</p>
+  </div>
+  <div class="search"><input id="q" type="search" placeholder="筛选 demo（名字 / 目录）" autocomplete="off"></div>
+  <nav id="nav">
+    <div class="group" data-group="start">
+      <div class="group-title">起步 · M1–M5</div>
+      <a class="item" href="#rotating-cube" data-dir="rotating-cube" title="M1 · 最简 AGAL 通路：一个绕 Y 轴自转的红色立方体">
+        <span class="name">旋转立方体</span>
+        <span class="meta">rotating-cube · 53s</span>
+      </a>
+      <a class="item" href="#pbr-cube" data-dir="pbr-cube" title="M2 · GGX 微表面光照，右半用棋盘格 map 采样">
+        <span class="name">PBR 立方体</span>
+        <span class="meta">pbr-cube · 53s</span>
+      </a>
+      <a class="item" href="#loader-scene" data-dir="loader-scene" title="M3 · three.js format 4 JSON → ObjectLoader 重建整棵场景树">
+        <span class="name">JSON 场景加载</span>
+        <span class="meta">loader-scene · 53s</span>
+      </a>
+      <a class="item" href="#texture-maps" data-dir="texture-maps" title="M4 · 法线 / 粗糙度 / 金属度三张贴图各显其效">
+        <span class="name">PBR 贴图族</span>
+        <span class="meta">texture-maps · 53s</span>
+      </a>
+      <a class="item" href="#asset-load" data-dir="asset-load" title="M5 · 运行时从磁盘读 suzanne 场景与 PNG 贴图">
+        <span class="name">外部资产</span>
+        <span class="meta">asset-load · 53s</span>
+      </a>
+    </div>
+    <div class="group" data-group="light">
+      <div class="group-title">光照与材质 · M6–M10</div>
+      <a class="item" href="#light-m6" data-dir="light-m6" title="M6 · 多光源逐光累加，聚光在地面留下椭圆光斑">
+        <span class="name">点光 + 聚光</span>
+        <span class="meta">light-m6 · 53s</span>
+      </a>
+      <a class="item" href="#shadow-m7" data-dir="shadow-m7" title="M7 · 深度预渲染 + 主 pass 阴影比较，悬空立方体投到地面">
+        <span class="name">方向光阴影</span>
+        <span class="meta">shadow-m7 · 54s</span>
+      </a>
+      <a class="item" href="#gltf-m8" data-dir="gltf-m8" title="M8 · 鸭子与 DamagedHelmet 同屏，emissive / AO 全贴图">
+        <span class="name">glTF 2.0</span>
+        <span class="meta">gltf-m8 · 58s</span>
+      </a>
+      <a class="item" href="#env-m9" data-dir="env-m9" title="M9 · 五个金属球只靠立方体环境贴图照明，粗糙度 0.05→1.0">
+        <span class="name">环境贴图 IBL</span>
+        <span class="meta">env-m9 · 55s</span>
+      </a>
+      <a class="item" href="#alpha-m10" data-dir="alpha-m10" title="M10 · 透明排序、alphaTest 镂空、ACES 高光滚降">
+        <span class="name">透明与色调映射</span>
+        <span class="meta">alpha-m10 · 55s</span>
+      </a>
+    </div>
+    <div class="group" data-group="geometry">
+      <div class="group-title">几何 / 动画 / 阴影 · M11–M13</div>
+      <a class="item" href="#geometry-m11" data-dir="geometry-m11" title="M11 · 七种几何画廊 + 线框 + 40 个屏外盒被视锥剔除">
+        <span class="name">几何族与剔除</span>
+        <span class="meta">geometry-m11 · 54s</span>
+      </a>
+      <a class="item" href="#animation-m12" data-dir="animation-m12" title="M12 · 关键帧插值、6 骨节鞭的 CPU 蒙皮、形变球">
+        <span class="name">动画与蒙皮</span>
+        <span class="meta">animation-m12 · 57s</span>
+      </a>
+      <a class="item" href="#shadow-m13" data-dir="shadow-m13" title="M13 · 9 tap PCF + normalBias + 镂空 caster 透光">
+        <span class="name">PCF 软阴影</span>
+        <span class="meta">shadow-m13 · 53s</span>
+      </a>
+    </div>
+    <div class="group" data-group="interaction">
+      <div class="group-title">交互与状态 · M14–M20</div>
+      <a class="item" href="#interaction-m14" data-dir="interaction-m14" title="M14 · 射线拾取彩色盒环，左拖旋转 / 滚轮 / 右键平移">
+        <span class="name">拾取与轨道相机</span>
+        <span class="meta">interaction-m14 · 53s</span>
+      </a>
+      <a class="item" href="#stats-m15" data-dir="stats-m15" title="M15 · stats.js 风格的 FPS / MS / MB 面板">
+        <span class="name">性能 HUD</span>
+        <span class="meta">stats-m15 · 53s</span>
+      </a>
+      <a class="item" href="#texstate-m17" data-dir="texstate-m17" title="M17 · wrap / mip / anisotropy 这些字段真的生效">
+        <span class="name">纹理状态</span>
+        <span class="meta">texstate-m17 · 52s</span>
+      </a>
+      <a class="item" href="#uv-m18" data-dir="uv-m18" title="M18 · offset / repeat / rotation 作用在采样坐标上">
+        <span class="name">UV 变换</span>
+        <span class="meta">uv-m18 · 51s</span>
+      </a>
+      <a class="item" href="#renderstate-m19" data-dir="renderstate-m19" title="M19 · 深度测试、混合、剔除模式的可见差异">
+        <span class="name">渲染状态</span>
+        <span class="meta">renderstate-m19 · 50s</span>
+      </a>
+      <a class="item" href="#scene-m20" data-dir="scene-m20" title="M20 · 雾与四处 P1 分歧修正">
+        <span class="name">场景雾</span>
+        <span class="meta">scene-m20 · 46s</span>
+      </a>
+    </div>
+    <div class="group" data-group="widgets">
+      <div class="group-title">控件与资产 · M24–M26</div>
+      <a class="item" href="#panel-m24" data-dir="panel-m24" title="M24 · asaotui 面板（滑杆 / 下拉 / 复选）驱动 3D 场景">
+        <span class="name">控制面板</span>
+        <span class="meta">panel-m24 · 61s</span>
+      </a>
+      <a class="item" href="#cubeface-m25" data-dir="cubeface-m25" title="M25 · 六面各涂一色，核对两个运行时的朝向上屏一致">
+        <span class="name">立方体六面</span>
+        <span class="meta">cubeface-m25 · 46s</span>
+      </a>
+      <a class="item" href="#hdr-m25" data-dir="hdr-m25" title="M25 · 从 .hdr / .exr 全景图生成环境光照">
+        <span class="name">HDR 全景</span>
+        <span class="meta">hdr-m25 · 46s</span>
+      </a>
+      <a class="item" href="#walk-m26" data-dir="walk-m26" title="M26 · three.js webgl_animation_walk 的 AS3 复刻">
+        <span class="name">角色行走</span>
+        <span class="meta">walk-m26 · 54s</span>
+      </a>
+      <a class="item" href="#m26-parity" data-dir="m26-parity" title="M26 · 与参照实现逐像素比对，打印 PARITY 报告后自行退出">
+        <span class="name">逐像素对照自检</span>
+        <span class="meta">m26-parity · 53s</span>
+      </a>
+    </div>
+    <div class="group" data-group="shader">
+      <div class="group-title">原生着色器与海洋 · M30–M34</div>
+      <a class="item" href="#shader-m30" data-dir="shader-m30" title="M30 · 手写 GLSL 顶点 / 片段程序经原生通道上屏">
+        <span class="name">原生 GLSL 通道</span>
+        <span class="meta">shader-m30 · 46s</span>
+      </a>
+      <a class="item" href="#shader-m31" data-dir="shader-m31" title="M31 · FFT 海洋需要的四项后端能力逐条验证">
+        <span class="name">原生通道能力矩阵</span>
+        <span class="meta">shader-m31 · 46s</span>
+      </a>
+      <a class="item" href="#ocean-m32" data-dir="ocean-m32" title="M32 · Ultra-Water 复刻：FFT 波谱、天空 LUT、水面着色">
+        <span class="name">FFT 海洋 · 第一片</span>
+        <span class="meta">ocean-m32 · 47s</span>
+      </a>
+      <a class="item" href="#shader-m33" data-dir="shader-m33" title="M33 · 天空与海洋依赖的五项通道能力审计">
+        <span class="name">通道能力审计</span>
+        <span class="meta">shader-m33 · 42s</span>
+      </a>
+      <a class="item" href="#ocean-m34" data-dir="ocean-m34" title="M34 · 大气 / 焦散 / 光束 / 泛光 / 调色，外加一整块真面板">
+        <span class="name">Ultra-Water 完整复刻</span>
+        <span class="meta">ocean-m34 · 52s</span>
+      </a>
+    </div></nav>
+</aside>
+<main>
+  <header>
+    <div class="titles"><h2 id="title">载入中…</h2><p id="blurb"></p></div>
+    <button id="reload" title="重新载入当前 demo">重新载入</button>
+    <a class="btn" id="open" href="#" target="_blank" rel="noopener">新窗口</a>
+  </header>
+  <div class="stage">
+    <iframe id="frame" title="demo" allow="fullscreen"></iframe>
+    <div class="notice" id="notice"></div>
+  </div>
+  <footer>构建于 2026-11-03 08:13 · 键盘 ↑ ↓ 切换 · <span id="pos">–</span></footer>
+</main>
+<script>
+var DEMOS = [{"dir":"rotating-cube","title":"旋转立方体","group":"start","blurb":"M1 · 最简 AGAL 通路：一个绕 Y 轴自转的红色立方体","ok":true,"reason":""},{"dir":"pbr-cube","title":"PBR 立方体","group":"start","blurb":"M2 · GGX 微表面光照，右半用棋盘格 map 采样","ok":true,"reason":""},{"dir":"loader-scene","title":"JSON 场景加载","group":"start","blurb":"M3 · three.js format 4 JSON → ObjectLoader 重建整棵场景树","ok":true,"reason":""},{"dir":"texture-maps","title":"PBR 贴图族","group":"start","blurb":"M4 · 法线 / 粗糙度 / 金属度三张贴图各显其效","ok":true,"reason":""},{"dir":"asset-load","title":"外部资产","group":"start","blurb":"M5 · 运行时从磁盘读 suzanne 场景与 PNG 贴图","ok":true,"reason":""},{"dir":"light-m6","title":"点光 + 聚光","group":"light","blurb":"M6 · 多光源逐光累加，聚光在地面留下椭圆光斑","ok":true,"reason":""},{"dir":"shadow-m7","title":"方向光阴影","group":"light","blurb":"M7 · 深度预渲染 + 主 pass 阴影比较，悬空立方体投到地面","ok":true,"reason":""},{"dir":"gltf-m8","title":"glTF 2.0","group":"light","blurb":"M8 · 鸭子与 DamagedHelmet 同屏，emissive / AO 全贴图","ok":true,"reason":""},{"dir":"env-m9","title":"环境贴图 IBL","group":"light","blurb":"M9 · 五个金属球只靠立方体环境贴图照明，粗糙度 0.05→1.0","ok":true,"reason":""},{"dir":"alpha-m10","title":"透明与色调映射","group":"light","blurb":"M10 · 透明排序、alphaTest 镂空、ACES 高光滚降","ok":true,"reason":""},{"dir":"geometry-m11","title":"几何族与剔除","group":"geometry","blurb":"M11 · 七种几何画廊 + 线框 + 40 个屏外盒被视锥剔除","ok":true,"reason":""},{"dir":"animation-m12","title":"动画与蒙皮","group":"geometry","blurb":"M12 · 关键帧插值、6 骨节鞭的 CPU 蒙皮、形变球","ok":true,"reason":""},{"dir":"shadow-m13","title":"PCF 软阴影","group":"geometry","blurb":"M13 · 9 tap PCF + normalBias + 镂空 caster 透光","ok":true,"reason":""},{"dir":"interaction-m14","title":"拾取与轨道相机","group":"interaction","blurb":"M14 · 射线拾取彩色盒环，左拖旋转 / 滚轮 / 右键平移","ok":true,"reason":""},{"dir":"stats-m15","title":"性能 HUD","group":"interaction","blurb":"M15 · stats.js 风格的 FPS / MS / MB 面板","ok":true,"reason":""},{"dir":"texstate-m17","title":"纹理状态","group":"interaction","blurb":"M17 · wrap / mip / anisotropy 这些字段真的生效","ok":true,"reason":""},{"dir":"uv-m18","title":"UV 变换","group":"interaction","blurb":"M18 · offset / repeat / rotation 作用在采样坐标上","ok":true,"reason":""},{"dir":"renderstate-m19","title":"渲染状态","group":"interaction","blurb":"M19 · 深度测试、混合、剔除模式的可见差异","ok":true,"reason":""},{"dir":"scene-m20","title":"场景雾","group":"interaction","blurb":"M20 · 雾与四处 P1 分歧修正","ok":true,"reason":""},{"dir":"panel-m24","title":"控制面板","group":"widgets","blurb":"M24 · asaotui 面板（滑杆 / 下拉 / 复选）驱动 3D 场景","ok":true,"reason":""},{"dir":"cubeface-m25","title":"立方体六面","group":"widgets","blurb":"M25 · 六面各涂一色，核对两个运行时的朝向上屏一致","ok":true,"reason":""},{"dir":"hdr-m25","title":"HDR 全景","group":"widgets","blurb":"M25 · 从 .hdr / .exr 全景图生成环境光照","ok":true,"reason":""},{"dir":"walk-m26","title":"角色行走","group":"widgets","blurb":"M26 · three.js webgl_animation_walk 的 AS3 复刻","ok":true,"reason":""},{"dir":"m26-parity","title":"逐像素对照自检","group":"widgets","blurb":"M26 · 与参照实现逐像素比对，打印 PARITY 报告后自行退出","ok":true,"reason":""},{"dir":"shader-m30","title":"原生 GLSL 通道","group":"shader","blurb":"M30 · 手写 GLSL 顶点 / 片段程序经原生通道上屏","ok":true,"reason":""},{"dir":"shader-m31","title":"原生通道能力矩阵","group":"shader","blurb":"M31 · FFT 海洋需要的四项后端能力逐条验证","ok":true,"reason":""},{"dir":"ocean-m32","title":"FFT 海洋 · 第一片","group":"shader","blurb":"M32 · Ultra-Water 复刻：FFT 波谱、天空 LUT、水面着色","ok":true,"reason":""},{"dir":"shader-m33","title":"通道能力审计","group":"shader","blurb":"M33 · 天空与海洋依赖的五项通道能力审计","ok":true,"reason":""},{"dir":"ocean-m34","title":"Ultra-Water 完整复刻","group":"shader","blurb":"M34 · 大气 / 焦散 / 光束 / 泛光 / 调色，外加一整块真面板","ok":true,"reason":""}];
+var byDir = {};
+DEMOS.forEach(function (d, i) { byDir[d.dir] = d; d.index = i; });
+
+var frame = document.getElementById('frame');
+var notice = document.getElementById('notice');
+var titleEl = document.getElementById('title');
+var blurbEl = document.getElementById('blurb');
+var openEl = document.getElementById('open');
+var posEl = document.getElementById('pos');
+var current = null;
+
+function ordered() { return DEMOS.filter(function (d) { return visible(d); }); }
+
+function visible(d) {
+  var q = (document.getElementById('q').value || '').toLowerCase();
+  if (!q) return true;
+  return (d.title + ' ' + d.dir + ' ' + d.blurb).toLowerCase().indexOf(q) >= 0;
+}
+
+function show(dir, push) {
+  var d = byDir[dir];
+  if (!d) d = DEMOS.filter(function (x) { return x.ok; })[0];
+  if (!d) return;
+  if (current === d.dir) return;
+  current = d.dir;
+  document.querySelectorAll('.item').forEach(function (el) {
+    el.classList.toggle('active', el.dataset.dir === d.dir);
+  });
+  titleEl.textContent = d.title;
+  blurbEl.textContent = d.blurb;
+  openEl.href = d.dir + '/index.html';
+  var list = ordered();
+  var at = list.indexOf(d);
+  posEl.textContent = d.ok ? (at >= 0 ? (at + 1) + ' / ' + list.length : '') : '仅原生';
+  if (d.ok) {
+    notice.classList.remove('show');
+    resetFrameBox();
+    frame.src = d.dir + '/index.html';
+  } else {    // Not a dead link and not a broken page: say exactly why this one is missing.
+    frame.removeAttribute('src');
+    frame.style.display = 'none';
+    notice.classList.add('show');
+    notice.innerHTML = '<div><strong>这个 demo 只在原生后端上屏</strong>' +
+      (d.reason ? d.reason : '本后端不支持该 demo 需要的通道能力') +
+      '<br><br>它在 macOS / Windows 上以 Metal / D3D 运行；<code>--target wasm</code> 侧还没有对应的通道。</div>';
+  }
+  if (push && location.hash.slice(1) !== d.dir) location.hash = d.dir;
+}
+
+function step(delta) {
+  var list = ordered();
+  var at = list.findIndex(function (d) { return d.dir === current; });
+  if (at < 0) at = 0;
+  var next = list[Math.min(list.length - 1, Math.max(0, at + delta))];
+  if (next) show(next.dir, true);
+}
+
+document.getElementById('nav').addEventListener('click', function (ev) {
+  var a = ev.target.closest('.item');
+  if (!a) return;
+  ev.preventDefault();
+  show(a.dataset.dir, true);
+});
+document.getElementById('reload').addEventListener('click', function () {
+  if (current && byDir[current] && byDir[current].ok) {
+    frame.src = byDir[current].dir + '/index.html?t=' + Date.now();
+  }
+});
+document.getElementById('q').addEventListener('input', function () {
+  var q = this.value.toLowerCase();
+  document.querySelectorAll('.group').forEach(function (g) {
+    var any = false;
+    g.querySelectorAll('.item').forEach(function (el) {
+      var d = byDir[el.dataset.dir];
+      var hit = !q || (d.title + ' ' + d.dir + ' ' + d.blurb).toLowerCase().indexOf(q) >= 0;
+      el.style.display = hit ? 'block' : 'none';
+      if (hit) any = true;
+    });
+    g.style.display = any ? 'block' : 'none';
+  });
+});
+function resetFrameBox() {
+  // The iframe is always exactly the stage, which is the maximum area the layout
+  // gives it. Nothing about a demo's geometry is scaled here any more: the demo's
+  // own canvas follows its CSS box (data-asc-fill) and the wasm side resizes the
+  // stage to match, so the app re-renders at the real size instead of a fixed
+  // bitmap being stretched by CSS -- see the note at the bottom of this file.
+  frame.style.width = '100%';
+  frame.style.height = '100%';
+  frame.style.display = 'block';
+}
+
+window.addEventListener('hashchange', function () { show(location.hash.slice(1), false); });
+window.addEventListener('keydown', function (ev) {
+  if (ev.target.tagName === 'INPUT') return;
+  if (ev.key === 'ArrowDown' || ev.key === 'j') { ev.preventDefault(); step(1); }
+  if (ev.key === 'ArrowUp' || ev.key === 'k') { ev.preventDefault(); step(-1); }
+});
+
+// WHY THE GALLERY DOES NOT SCALE THE CANVAS ITSELF.
+// The stage is an <iframe> filling the main column, i.e. the largest area the
+// layout offers, and the demo's canvas fills the iframe (the emitted page marks it
+// data-asc-fill). The wasm side treats the canvas box as its window size: it
+// rebuilds the drawable, updates stageWidth/stageHeight and dispatches RESIZE, so
+// a NO_SCALE scene (asaot3d's Stage3DApp) re-lays-out and its Stage3D back buffer
+// follows -- the same thing adl does when its window is resized.
+//
+// The previous version instead froze the canvas at its descriptor size and
+// CSS-scaled it to fit. That is not a resize: the app keeps rendering a small
+// bitmap and the browser stretches it, which is why switching demos left a tiny
+// box (measured before main() had sized the canvas) and why a fitted one looked
+// soft -- and the pointer mapping drifted with every scale factor.
+
+frame.addEventListener('load', function () {
+  frame.style.display = 'block';
+});
+
+show(location.hash.slice(1) || (DEMOS.filter(function (d) { return d.ok; })[0] || {}).dir, false);
+</script>
+</body>
+</html>

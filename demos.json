@@ -1,0 +1,506 @@
+{
+  "generated": "2026-11-03T08:13:25.331Z",
+  "font": "fonts/Arial.ttf",
+  "groups": [
+    {
+      "id": "start",
+      "title": "起步 · M1–M5"
+    },
+    {
+      "id": "light",
+      "title": "光照与材质 · M6–M10"
+    },
+    {
+      "id": "geometry",
+      "title": "几何 / 动画 / 阴影 · M11–M13"
+    },
+    {
+      "id": "interaction",
+      "title": "交互与状态 · M14–M20"
+    },
+    {
+      "id": "widgets",
+      "title": "控件与资产 · M24–M26"
+    },
+    {
+      "id": "shader",
+      "title": "原生着色器与海洋 · M30–M34"
+    }
+  ],
+  "demos": [
+    {
+      "dir": "rotating-cube",
+      "title": "旋转立方体",
+      "group": "start",
+      "blurb": "M1 · 最简 AGAL 通路：一个绕 Y 轴自转的红色立方体",
+      "status": "ok",
+      "bytes": 8902772,
+      "ms": 52874,
+      "assets": 0,
+      "files": [
+        "index.html",
+        "index.js",
+        "index.wasm"
+      ],
+      "wallMs": 52890
+    },
+    {
+      "dir": "pbr-cube",
+      "title": "PBR 立方体",
+      "group": "start",
+      "blurb": "M2 · GGX 微表面光照，右半用棋盘格 map 采样",
+      "status": "ok",
+      "bytes": 8905688,
+      "ms": 52864,
+      "assets": 0,
+      "files": [
+        "index.html",
+        "index.js",
+        "index.wasm"
+      ],
+      "wallMs": 52874
+    },
+    {
+      "dir": "loader-scene",
+      "title": "JSON 场景加载",
+      "group": "start",
+      "blurb": "M3 · three.js format 4 JSON → ObjectLoader 重建整棵场景树",
+      "status": "ok",
+      "bytes": 8936796,
+      "ms": 52875,
+      "assets": 0,
+      "files": [
+        "index.html",
+        "index.js",
+        "index.wasm"
+      ],
+      "wallMs": 52887
+    },
+    {
+      "dir": "texture-maps",
+      "title": "PBR 贴图族",
+      "group": "start",
+      "blurb": "M4 · 法线 / 粗糙度 / 金属度三张贴图各显其效",
+      "status": "ok",
+      "bytes": 8910652,
+      "ms": 52916,
+      "assets": 0,
+      "files": [
+        "index.html",
+        "index.js",
+        "index.wasm"
+      ],
+      "wallMs": 52925
+    },
+    {
+      "dir": "asset-load",
+      "title": "外部资产",
+      "group": "start",
+      "blurb": "M5 · 运行时从磁盘读 suzanne 场景与 PNG 贴图",
+      "status": "ok",
+      "bytes": 8997881,
+      "ms": 53000,
+      "assets": 2,
+      "files": [
+        "index.data",
+        "index.html",
+        "index.js",
+        "index.wasm"
+      ],
+      "wallMs": 53011
+    },
+    {
+      "dir": "light-m6",
+      "title": "点光 + 聚光",
+      "group": "light",
+      "blurb": "M6 · 多光源逐光累加，聚光在地面留下椭圆光斑",
+      "status": "ok",
+      "bytes": 8905800,
+      "ms": 52859,
+      "assets": 0,
+      "files": [
+        "index.html",
+        "index.js",
+        "index.wasm"
+      ],
+      "wallMs": 52874
+    },
+    {
+      "dir": "shadow-m7",
+      "title": "方向光阴影",
+      "group": "light",
+      "blurb": "M7 · 深度预渲染 + 主 pass 阴影比较，悬空立方体投到地面",
+      "status": "ok",
+      "bytes": 8906372,
+      "ms": 54204,
+      "assets": 0,
+      "files": [
+        "index.html",
+        "index.js",
+        "index.wasm"
+      ],
+      "wallMs": 54211
+    },
+    {
+      "dir": "gltf-m8",
+      "title": "glTF 2.0",
+      "group": "light",
+      "blurb": "M8 · 鸭子与 DamagedHelmet 同屏，emissive / AO 全贴图",
+      "status": "ok",
+      "bytes": 13086865,
+      "ms": 57562,
+      "assets": 2,
+      "files": [
+        "index.data",
+        "index.html",
+        "index.js",
+        "index.wasm"
+      ],
+      "wallMs": 57582
+    },
+    {
+      "dir": "env-m9",
+      "title": "环境贴图 IBL",
+      "group": "light",
+      "blurb": "M9 · 五个金属球只靠立方体环境贴图照明，粗糙度 0.05→1.0",
+      "status": "ok",
+      "bytes": 9197539,
+      "ms": 55069,
+      "assets": 6,
+      "files": [
+        "index.data",
+        "index.html",
+        "index.js",
+        "index.wasm"
+      ],
+      "wallMs": 55088
+    },
+    {
+      "dir": "alpha-m10",
+      "title": "透明与色调映射",
+      "group": "light",
+      "blurb": "M10 · 透明排序、alphaTest 镂空、ACES 高光滚降",
+      "status": "ok",
+      "bytes": 8919919,
+      "ms": 54536,
+      "assets": 0,
+      "files": [
+        "index.html",
+        "index.js",
+        "index.wasm"
+      ],
+      "wallMs": 54542
+    },
+    {
+      "dir": "geometry-m11",
+      "title": "几何族与剔除",
+      "group": "geometry",
+      "blurb": "M11 · 七种几何画廊 + 线框 + 40 个屏外盒被视锥剔除",
+      "status": "ok",
+      "bytes": 8992203,
+      "ms": 54466,
+      "assets": 0,
+      "files": [
+        "index.html",
+        "index.js",
+        "index.wasm"
+      ],
+      "wallMs": 54473
+    },
+    {
+      "dir": "animation-m12",
+      "title": "动画与蒙皮",
+      "group": "geometry",
+      "blurb": "M12 · 关键帧插值、6 骨节鞭的 CPU 蒙皮、形变球",
+      "status": "ok",
+      "bytes": 9097877,
+      "ms": 56836,
+      "assets": 0,
+      "files": [
+        "index.html",
+        "index.js",
+        "index.wasm"
+      ],
+      "wallMs": 56846
+    },
+    {
+      "dir": "shadow-m13",
+      "title": "PCF 软阴影",
+      "group": "geometry",
+      "blurb": "M13 · 9 tap PCF + normalBias + 镂空 caster 透光",
+      "status": "ok",
+      "bytes": 8914156,
+      "ms": 52782,
+      "assets": 0,
+      "files": [
+        "index.html",
+        "index.js",
+        "index.wasm"
+      ],
+      "wallMs": 52787
+    },
+    {
+      "dir": "interaction-m14",
+      "title": "拾取与轨道相机",
+      "group": "interaction",
+      "blurb": "M14 · 射线拾取彩色盒环，左拖旋转 / 滚轮 / 右键平移",
+      "status": "ok",
+      "bytes": 8963879,
+      "ms": 52655,
+      "assets": 0,
+      "files": [
+        "index.html",
+        "index.js",
+        "index.wasm"
+      ],
+      "wallMs": 52662
+    },
+    {
+      "dir": "stats-m15",
+      "title": "性能 HUD",
+      "group": "interaction",
+      "blurb": "M15 · stats.js 风格的 FPS / MS / MB 面板",
+      "status": "ok",
+      "bytes": 8954103,
+      "ms": 52836,
+      "assets": 0,
+      "files": [
+        "index.html",
+        "index.js",
+        "index.wasm"
+      ],
+      "wallMs": 52841
+    },
+    {
+      "dir": "texstate-m17",
+      "title": "纹理状态",
+      "group": "interaction",
+      "blurb": "M17 · wrap / mip / anisotropy 这些字段真的生效",
+      "status": "ok",
+      "bytes": 9112783,
+      "ms": 52406,
+      "assets": 1,
+      "files": [
+        "index.data",
+        "index.html",
+        "index.js",
+        "index.wasm"
+      ],
+      "wallMs": 52414
+    },
+    {
+      "dir": "uv-m18",
+      "title": "UV 变换",
+      "group": "interaction",
+      "blurb": "M18 · offset / repeat / rotation 作用在采样坐标上",
+      "status": "ok",
+      "bytes": 9116977,
+      "ms": 50645,
+      "assets": 1,
+      "files": [
+        "index.data",
+        "index.html",
+        "index.js",
+        "index.wasm"
+      ],
+      "wallMs": 50653
+    },
+    {
+      "dir": "renderstate-m19",
+      "title": "渲染状态",
+      "group": "interaction",
+      "blurb": "M19 · 深度测试、混合、剔除模式的可见差异",
+      "status": "ok",
+      "bytes": 8921596,
+      "ms": 50404,
+      "assets": 0,
+      "files": [
+        "index.html",
+        "index.js",
+        "index.wasm"
+      ],
+      "wallMs": 50411
+    },
+    {
+      "dir": "scene-m20",
+      "title": "场景雾",
+      "group": "interaction",
+      "blurb": "M20 · 雾与四处 P1 分歧修正",
+      "status": "ok",
+      "bytes": 8917120,
+      "ms": 46246,
+      "assets": 0,
+      "files": [
+        "index.html",
+        "index.js",
+        "index.wasm"
+      ],
+      "wallMs": 46252
+    },
+    {
+      "dir": "panel-m24",
+      "title": "控制面板",
+      "group": "widgets",
+      "blurb": "M24 · asaotui 面板（滑杆 / 下拉 / 复选）驱动 3D 场景",
+      "status": "ok",
+      "bytes": 10222117,
+      "ms": 61264,
+      "assets": 0,
+      "files": [
+        "index.html",
+        "index.js",
+        "index.wasm"
+      ],
+      "wallMs": 61321
+    },
+    {
+      "dir": "cubeface-m25",
+      "title": "立方体六面",
+      "group": "widgets",
+      "blurb": "M25 · 六面各涂一色，核对两个运行时的朝向上屏一致",
+      "status": "ok",
+      "bytes": 8948114,
+      "ms": 46049,
+      "assets": 6,
+      "files": [
+        "index.data",
+        "index.html",
+        "index.js",
+        "index.wasm"
+      ],
+      "wallMs": 46058
+    },
+    {
+      "dir": "hdr-m25",
+      "title": "HDR 全景",
+      "group": "widgets",
+      "blurb": "M25 · 从 .hdr / .exr 全景图生成环境光照",
+      "status": "ok",
+      "bytes": 9051327,
+      "ms": 46483,
+      "assets": 2,
+      "files": [
+        "index.data",
+        "index.html",
+        "index.js",
+        "index.wasm"
+      ],
+      "wallMs": 46495
+    },
+    {
+      "dir": "walk-m26",
+      "title": "角色行走",
+      "group": "widgets",
+      "blurb": "M26 · three.js webgl_animation_walk 的 AS3 复刻",
+      "status": "ok",
+      "bytes": 12152128,
+      "ms": 53731,
+      "assets": 9,
+      "files": [
+        "index.data",
+        "index.html",
+        "index.js",
+        "index.wasm"
+      ],
+      "wallMs": 53761
+    },
+    {
+      "dir": "m26-parity",
+      "title": "逐像素对照自检",
+      "group": "widgets",
+      "blurb": "M26 · 与参照实现逐像素比对，打印 PARITY 报告后自行退出",
+      "status": "ok",
+      "bytes": 11877597,
+      "ms": 53358,
+      "assets": 3,
+      "files": [
+        "index.data",
+        "index.html",
+        "index.js",
+        "index.wasm"
+      ],
+      "wallMs": 53382
+    },
+    {
+      "dir": "shader-m30",
+      "title": "原生 GLSL 通道",
+      "group": "shader",
+      "blurb": "M30 · 手写 GLSL 顶点 / 片段程序经原生通道上屏",
+      "status": "ok",
+      "bytes": 8906906,
+      "ms": 46156,
+      "assets": 0,
+      "files": [
+        "index.html",
+        "index.js",
+        "index.wasm"
+      ],
+      "wallMs": 46161
+    },
+    {
+      "dir": "shader-m31",
+      "title": "原生通道能力矩阵",
+      "group": "shader",
+      "blurb": "M31 · FFT 海洋需要的四项后端能力逐条验证",
+      "status": "ok",
+      "bytes": 8927101,
+      "ms": 45802,
+      "assets": 0,
+      "files": [
+        "index.html",
+        "index.js",
+        "index.wasm"
+      ],
+      "wallMs": 45816
+    },
+    {
+      "dir": "ocean-m32",
+      "title": "FFT 海洋 · 第一片",
+      "group": "shader",
+      "blurb": "M32 · Ultra-Water 复刻：FFT 波谱、天空 LUT、水面着色",
+      "status": "ok",
+      "bytes": 8973801,
+      "ms": 47065,
+      "assets": 0,
+      "files": [
+        "index.html",
+        "index.js",
+        "index.wasm"
+      ],
+      "wallMs": 47071
+    },
+    {
+      "dir": "shader-m33",
+      "title": "通道能力审计",
+      "group": "shader",
+      "blurb": "M33 · 天空与海洋依赖的五项通道能力审计",
+      "status": "ok",
+      "bytes": 8925945,
+      "ms": 41900,
+      "assets": 0,
+      "files": [
+        "index.html",
+        "index.js",
+        "index.wasm"
+      ],
+      "wallMs": 41906
+    },
+    {
+      "dir": "ocean-m34",
+      "title": "Ultra-Water 完整复刻",
+      "group": "shader",
+      "blurb": "M34 · 大气 / 焦散 / 光束 / 泛光 / 调色，外加一整块真面板",
+      "status": "ok",
+      "bytes": 10604954,
+      "ms": 52300,
+      "assets": 38,
+      "files": [
+        "index.data",
+        "index.html",
+        "index.js",
+        "index.wasm"
+      ],
+      "wallMs": 52360
+    }
+  ]
+}

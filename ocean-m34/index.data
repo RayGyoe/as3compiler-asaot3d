@@ -1,0 +1,1337 @@
+#version 300 es
+// adapt.frag -- auto-exposure step 2/2: the 32x32 log-luminance grid down to one value,
+// with temporal adaptation, ported from Ultra-Water PostFX.js (`ADAPT_FRAG`).
+//
+// The mean is taken in LOG space (the geometric mean of the luminance), because that is
+// what "the scene's typical brightness" means to an eye: an arithmetic mean is dominated
+// by the sun and the sea's glitter. The result is blended towards the previous frame's
+// value at a rate that depends on the direction -- brightening adapts at ~0.4 s, darkening
+// at ~1 s, like a real pupil -- and ping-pongs through a 1x1 target so the state lives on
+// the GPU and no readback is needed anywhere in the frame.
+uniform sampler2D uSrc;    // metering target, linear filtered
+uniform sampler2D uPrev;   // previous 1x1 state
+uniform vec2 uK;           // blend factor when the scene brightens (x) / darkens (y); 1 = snap
+uniform vec2 uRange;       // allowed log2 luminance range (from min/max exposure)
+in vec2 vUV;
+out vec4 fragColor;
+
+void main() {
+  float sum = 0.0;
+  for (int j = 0; j < 16; j++) {
+    for (int i = 0; i < 16; i++) {
+      sum += texture(uSrc, (vec2(float(i), float(j)) + 0.5) * (1.0 / 16.0)).r;
+    }
+  }
+  float t = clamp(sum * (1.0 / 256.0), uRange.x, uRange.y);
+  float prev = texelFetch(uPrev, ivec2(0), 0).r;
+  float k = t > prev ? uK.x : uK.y;
+  float s = k >= 1.0 ? t : prev + (t - prev) * k;
+  if (isnan(s)) s = t;
+  fragColor = vec4(s, 0.0, 0.0, 1.0);
+}// atmo_core.glsl -- constants every atmosphere shader shares. No uniforms, no
+// functions: a pass includes only the blocks it actually references, because the
+// native channel binds author uniforms by reflected name and a uniform the
+// optimiser dropped is an ArgumentError at draw time.
+//
+// Ported from Ultra-Water src/scene/atmosphere.js (Hillaire 2020, "A Scalable and
+// Production Ready Sky and Atmosphere Rendering Technique"). Distances are km.
+precision highp float;
+precision highp sampler2D;
+
+#define PI 3.14159265359
+const float RB = 6360.0;          // ground radius
+const float RT = 6460.0;          // top of the atmosphere
+const float OBS_H = 0.01;         // observer altitude (sea level)
+const float H_TOP = 1132.2544;    // sqrt(RT^2 - RB^2)
+const float MIE_G = 0.8;          // aerosol phase anisotropy
+const float GROUND_ALBEDO = 0.1;
+const vec2 SKY_RES = vec2(192.0, 108.0);
+const float SUN_ILLUM = 1.0;
+
+// LUT parameterisation helpers (Bruneton): the stored texel centres are inset half a
+// texel so linear filtering never reaches past the edge.
+vec2 toSub(vec2 u, vec2 n) { return u * (n - 1.0) / n + 0.5 / n; }
+vec2 fromSub(vec2 u, vec2 n) { return (u - 0.5 / n) * n / (n - 1.0); }// atmo_integrate.glsl -- single-scattering radiance plus the multiple-scattering
+// approximation, along a view ray, for unit sun illuminance. Segments are integrated
+// analytically (Frostbite 2015 energy-conserving step); samples are spaced
+// quadratically so they crowd the observer.
+vec3 integrate(float h, float mu, float muS, float nu, int n, out vec3 fms) {
+  float r0 = RB + h;
+  float gd = r0 * r0 * (mu * mu - 1.0) + RB * RB;
+  bool ground = mu < 0.0 && gd >= 0.0;
+  float tMax = ground ? max(-r0 * mu - sqrt(gd), 0.0) : distTop(r0, mu);
+
+  float pR = rayleighPhase(nu), pM = miePhase(nu);
+  vec3 L = vec3(0.0), T = vec3(1.0);
+  fms = vec3(0.0);
+  float k = tMax / float(n * n);
+  for (int i = 0; i < n; i++) {
+    float fi = float(i);
+    float t = k * (fi + 0.5) * (fi + 0.5), dt = k * (2.0 * fi + 1.0);
+    float r;
+    float ht = altAt(h, mu, t, r);
+    float muSt = clamp((r0 * muS + t * nu) / r, -1.0, 1.0);
+    Medium m = medium(ht);
+    vec3 S = transmittance(ht, muSt) * sunVisible(ht, r, muSt) * (m.ray * pR + m.mie * pM);
+    S += m.scat * multiScatter(ht, muSt);
+    vec3 Ts = exp(-m.ext * dt);
+    vec3 seg = (1.0 - Ts) / max(m.ext, vec3(1e-7));
+    L += T * S * seg;
+    fms += T * m.scat * seg;
+    T *= Ts;
+  }
+  return L;
+}// atmo_integrate_ms.glsl -- the same integral as atmo_integrate.glsl, but for baking
+// the multiple-scattering LUT: isotropic phase, no multiple-scattering input (the LUT
+// would be reading itself), and the lit ground as a bottom boundary.
+vec3 integrateMs(float h, float mu, float muS, float nu, int n, out vec3 fms) {
+  float r0 = RB + h;
+  float gd = r0 * r0 * (mu * mu - 1.0) + RB * RB;
+  bool ground = mu < 0.0 && gd >= 0.0;
+  float tMax = ground ? max(-r0 * mu - sqrt(gd), 0.0) : distTop(r0, mu);
+
+  float pR = 1.0 / (4.0 * PI), pM = pR;
+  vec3 L = vec3(0.0), T = vec3(1.0);
+  fms = vec3(0.0);
+  float k = tMax / float(n * n);
+  for (int i = 0; i < n; i++) {
+    float fi = float(i);
+    float t = k * (fi + 0.5) * (fi + 0.5), dt = k * (2.0 * fi + 1.0);
+    float r;
+    float ht = altAt(h, mu, t, r);
+    float muSt = clamp((r0 * muS + t * nu) / r, -1.0, 1.0);
+    Medium m = medium(ht);
+    vec3 S = transmittance(ht, muSt) * sunVisible(ht, r, muSt) * (m.ray * pR + m.mie * pM);
+    vec3 Ts = exp(-m.ext * dt);
+    vec3 seg = (1.0 - Ts) / max(m.ext, vec3(1e-7));
+    L += T * S * seg;
+    fms += T * m.scat * seg;
+    T *= Ts;
+  }
+  if (ground) {
+    float muSg = clamp((r0 * muS + tMax * nu) / RB, -1.0, 1.0);
+    L += T * transmittance(0.0, muSg) * max(muSg, 0.0) * (GROUND_ALBEDO / PI);
+  }
+  return L;
+}// atmo_lut.glsl -- the transmittance LUT and its Bruneton parameterisation.
+uniform sampler2D uTransLut;
+
+vec2 transUv(float h, float mu) {
+  float r = RB + h, rho = sqrt(max(h, 0.0) * (2.0 * RB + h));
+  float dMin = RT - r, dMax = rho + H_TOP;
+  return vec2((distTop(r, mu) - dMin) / (dMax - dMin), rho / H_TOP);
+}
+
+vec3 transmittance(float h, float mu) {
+  return textureLod(uTransLut, transUv(h, mu), 0.0).rgb;
+}
+
+// 0 where the planet hides the sun from altitude h along radius r.
+float sunVisible(float h, float r, float muS) {
+  return step(-sqrt(max(h, 0.0) * (2.0 * RB + h)) / r, muS);
+}// atmo_math.glsl -- atmospheric medium and the geometry that walks it.
+uniform vec3 uRayleigh;   // Rayleigh scattering at sea level (1/km)
+uniform vec2 uMie;        // aerosol scattering, extinction at sea level (1/km)
+uniform vec3 uOzone;      // ozone absorption at the layer peak (1/km)
+
+// Altitude after travelling t along a ray that leaves altitude h with zenith cosine
+// mu. q = r^2 - RB^2 is evaluated directly so that shallow rays do not cancel.
+float altAt(float h, float mu, float t, out float r) {
+  float q = h * (2.0 * RB + h) + t * (2.0 * (RB + h) * mu + t);
+  r = sqrt(RB * RB + q);
+  return q / (r + RB);
+}
+
+struct Medium { vec3 ray; float mie; vec3 scat; vec3 ext; };
+
+Medium medium(float h) {
+  h = max(h, 0.0);
+  float dM = exp(-h / 1.2);
+  Medium m;
+  m.ray = uRayleigh * exp(-h / 8.0);
+  m.mie = uMie.x * dM;
+  m.scat = m.ray + m.mie;
+  // ozone: a tent between 10 and 40 km
+  m.ext = m.ray + uMie.y * dM + uOzone * max(0.0, 1.0 - abs(h - 25.0) / 15.0);
+  return m;
+}
+
+float distTop(float r, float mu) {
+  return max(-r * mu + sqrt(max(r * r * (mu * mu - 1.0) + RT * RT, 0.0)), 0.0);
+}// atmo_ms.glsl -- the multiple-scattering LUT (Hillaire eq. 10, stored as Psi_ms).
+uniform sampler2D uMsLut;
+
+vec3 multiScatter(float h, float muS) {
+  vec2 uv = clamp(vec2(muS * 0.5 + 0.5, h / (RT - RB)), 0.0, 1.0);
+  return textureLod(uMsLut, toSub(uv, vec2(32.0)), 0.0).rgb;
+}// atmo_phases.glsl -- Rayleigh and Cornette-Shanks/HG aerosol phase functions.
+float rayleighPhase(float c) { return 0.0596831 * (1.0 + c * c); }
+
+float miePhase(float c) {
+  float k = 1.0 + MIE_G * MIE_G - 2.0 * MIE_G * c;
+  return (1.0 - MIE_G * MIE_G) / (4.0 * PI * k * sqrt(k));
+}// atmo_sky.glsl -- the baked sky-view LUT lookup. The observer sits at sea level, so
+// only the upper hemisphere is stored; v = sqrt(elevation/90deg) crowds texels at the
+// horizon, u = sqrt of the azimuth cosine to the sun does the same around the sun.
+uniform sampler2D uSkyView;
+
+// lod = 0 is the baked radiance; higher levels are the prefiltered version a rough
+// surface reflects. Both the LUT's axes are warped (v = sqrt(elevation), u = sqrt of
+// the azimuth cosine), so a mip level is a blur in that warped space rather than a
+// true angular blur -- close enough at the low levels a rough sea actually asks for,
+// and far better than sampling level 0 on a facet tilted 30 degrees.
+vec3 skyViewLod(vec3 d, vec3 sunDir, float lod) {
+  float v = sqrt(asin(clamp(d.y, 0.0, 1.0)) / (0.5 * PI));
+  float cosPhi = dot(d.xz, sunDir.xz) *
+      inversesqrt(max(dot(d.xz, d.xz) * dot(sunDir.xz, sunDir.xz), 1e-12));
+  float u = sqrt(clamp(0.5 - 0.5 * cosPhi, 0.0, 1.0));
+  return textureLod(uSkyView, toSub(vec2(u, v), SKY_RES), lod).rgb;
+}
+
+vec3 skyView(vec3 d, vec3 sunDir) {
+  float v = sqrt(asin(clamp(d.y, 0.0, 1.0)) / (0.5 * PI));
+  float cosPhi = dot(d.xz, sunDir.xz) *
+      inversesqrt(max(dot(d.xz, d.xz) * dot(sunDir.xz, sunDir.xz), 1e-12));
+  float u = sqrt(clamp(0.5 - 0.5 * cosPhi, 0.0, 1.0));
+  return textureLod(uSkyView, toSub(vec2(u, v), SKY_RES), 0.0).rgb;
+}#version 300 es
+// bloom_down.frag -- one level of the bloom chain: 13-tap dual-filter downsample
+// (Call of Duty: Advanced Warfare), ported from Ultra-Water src/engine/PostFX.js (`DOWN`).
+//
+// With the PREFILTER define this is the FIRST level, which also thresholds: the soft-knee
+// curve keeps a little of what is just under the threshold so the glow does not pop, and
+// the Karis groups (weighted by 1/(1+luma)) stop one sun glint from dominating the bloom.
+// Every later level is the plain filter, which is what makes the chain a pyramid rather
+// than six independent blurs.
+//
+// `uTexel` is the SOURCE texel size: the taps are in texels of the level ABOVE, so the
+// footprint is 2x2 source texels per tap group no matter how small this level is.
+uniform sampler2D uSrc;
+uniform vec2 uTexel;
+#ifdef PREFILTER
+uniform vec4 uCurve;   // threshold - knee, 2*knee, 0.25/knee, threshold
+uniform float uClamp;
+#endif
+in vec2 vUV;
+out vec4 fragColor;
+
+float luma(vec3 c) { return dot(c, vec3(0.2126, 0.7152, 0.0722)); }
+
+vec3 tap(vec2 o) {
+  vec3 c = texture(uSrc, vUV + o * uTexel).rgb;
+#ifdef PREFILTER
+  c = max(c, 0.0);                      // negatives (and NaN on most GPUs) -> 0
+  float l = max(luma(c), 1e-4);
+  c *= min(1.0, uClamp / l);
+  l = min(l, uClamp);
+  float q = clamp(l - uCurve.x, 0.0, uCurve.y);
+  c *= max(uCurve.z * q * q, l - uCurve.w) / l;
+#endif
+  return c;
+}
+
+void main() {
+  vec3 a = tap(vec2(-2.0, 2.0)), b = tap(vec2(0.0, 2.0)), c = tap(vec2(2.0, 2.0));
+  vec3 d = tap(vec2(-2.0, 0.0)), e = tap(vec2(0.0, 0.0)), f = tap(vec2(2.0, 0.0));
+  vec3 g = tap(vec2(-2.0, -2.0)), h = tap(vec2(0.0, -2.0)), i = tap(vec2(2.0, -2.0));
+  vec3 j = tap(vec2(-1.0, 1.0)), k = tap(vec2(1.0, 1.0)), l = tap(vec2(-1.0, -1.0)), m = tap(vec2(1.0, -1.0));
+  vec3 g0 = (a + b + d + e) * 0.25, g1 = (b + c + e + f) * 0.25;
+  vec3 g2 = (d + e + g + h) * 0.25, g3 = (e + f + h + i) * 0.25;
+  vec3 g4 = (j + k + l + m) * 0.25;
+#ifdef PREFILTER
+  float w0 = 0.125 / (1.0 + luma(g0)), w1 = 0.125 / (1.0 + luma(g1));
+  float w2 = 0.125 / (1.0 + luma(g2)), w3 = 0.125 / (1.0 + luma(g3));
+  float w4 = 0.5 / (1.0 + luma(g4));
+  vec3 r = (g0 * w0 + g1 * w1 + g2 * w2 + g3 * w3 + g4 * w4) / (w0 + w1 + w2 + w3 + w4);
+#else
+  vec3 r = g4 * 0.5 + (g0 + g1 + g2 + g3) * 0.125;
+#endif
+  fragColor = vec4(r, 1.0);
+}#version 300 es
+// bloom_up.frag -- 9-tap tent upsample, ported from Ultra-Water PostFX.js (`UP`).
+//
+// Drawn with one/one blending ONTO the next finer level, so the pyramid accumulates
+// downwards: the wide, dim tail of the glow comes from the small levels, the tight
+// highlight from the first one. Replacing the destination instead of adding to it would
+// make the bloom a single-scale blur, which reads as a grey veil rather than a glow.
+uniform sampler2D uSrc;
+uniform vec2 uTexel;   // SOURCE (coarser) texel size
+in vec2 vUV;
+out vec4 fragColor;
+
+void main() {
+  vec4 d = uTexel.xyxy * vec4(1.0, 1.0, -1.0, 0.0);
+  vec3 s = texture(uSrc, vUV - d.xy).rgb + texture(uSrc, vUV - d.wy).rgb * 2.0 + texture(uSrc, vUV - d.zy).rgb
+         + texture(uSrc, vUV + d.zw).rgb * 2.0 + texture(uSrc, vUV).rgb * 4.0 + texture(uSrc, vUV + d.xw).rgb * 2.0
+         + texture(uSrc, vUV + d.zy).rgb + texture(uSrc, vUV + d.wy).rgb * 2.0 + texture(uSrc, vUV + d.xy).rgb;
+  fragColor = vec4(s * (1.0 / 16.0), 1.0);
+}#version 300 es
+// caustics.frag -- the landed area is one texel per pixel (the raster space IS the landed
+// space), so the ratio is the undisturbed area in texels per pixel. Additive blending,
+// one channel per slice depth; the clamp is the firefly limit.
+uniform vec3 uMask;
+in vec2 vOld;
+out vec4 outColor;
+void main() {
+  vec2 a = dFdx(vOld), b = dFdy(vOld);
+  outColor = vec4(uMask * min(abs(a.x * b.y - a.y * b.x), 16.0), 0.0);
+}#version 300 es
+// caustics.vert -- area-ratio splatting (Evan Wallace's WebGL water, as used by
+// Ultra-Water src/water/Caustics.js). A grid over the 12 m cascade's period is refracted
+// through its slopes onto a plane at uDepth; the fragment then adds
+// (undisturbed area / landed area) to that depth's channel. Output is intensity relative
+// to flat water, mean 1 by construction, so it multiplies direct sun.
+//
+// The landing offset of FLAT water is subtracted so the pattern registers to the surface
+// entry point: look it up at uv = entryXZ / 12.
+layout(location = 0) in vec3 aPos;   // cell coords, centred on the tile
+uniform sampler2D uSlope;            // cascade 2 (sx, sz, ...) tiling every 12 m
+uniform vec3 uSun;                   // towards the sun
+uniform float uDepth;
+uniform float uCells;
+uniform float uLod;
+uniform float uMargin;               // margins as a fraction of the tile
+uniform float uRes;
+out vec2 vOld;
+
+// cubic B-spline from 4 bilinear taps (GPU Gems 2 ch. 20). The landed intensity goes with
+// the slope's derivative, which bilinear makes piecewise constant: every slope texel
+// would land as its own bead along the caustic lines.
+vec2 slopeBSpline(vec2 uv, float lod) {
+  vec2 size = vec2(textureSize(uSlope, int(lod)));
+  vec2 st = uv * size - 0.5, i = floor(st), f = st - i;
+  vec2 f2 = f * f, f3 = f2 * f;
+  vec2 w0 = (1.0 - 3.0 * f + 3.0 * f2 - f3) / 6.0, w1 = (4.0 - 6.0 * f2 + 3.0 * f3) / 6.0;
+  vec2 w2 = (1.0 + 3.0 * f + 3.0 * f2 - 3.0 * f3) / 6.0, w3 = f3 / 6.0;
+  vec2 g0 = w0 + w1, g1 = w2 + w3;
+  vec2 h0 = (i - 0.5 + w1 / g0) / size, h1 = (i + 1.5 + w3 / g1) / size;
+  return g0.y * (g0.x * textureLod(uSlope, h0, lod).xy + g1.x * textureLod(uSlope, vec2(h1.x, h0.y), lod).xy)
+       + g1.y * (g0.x * textureLod(uSlope, vec2(h0.x, h1.y), lod).xy + g1.x * textureLod(uSlope, h1, lod).xy);
+}
+
+void main() {
+  vec2 t = (aPos.xy + 0.5 * uCells + 0.5) / uCells;   // tile uv, at a texel centre of mip uLod
+  vec2 s = slopeBSpline(t, uLod);
+  vec3 r = refract(-uSun, normalize(vec3(-s.x, 1.0, -s.y)), 0.75188);
+  vec3 rf = refract(-uSun, vec3(0.0, 1.0, 0.0), 0.75188);
+  vec2 d = (r.xz / max(-r.y, 0.05) - rf.xz / -rf.y) * (uDepth / 12.0);
+  // offsets past the margin (steep facets at low sun) are clamped; the margin covers it
+  d = clamp(d, -uMargin, uMargin);
+  vOld = t * uRes;
+  gl_Position = vec4((t + d) * 2.0 - 1.0, 0.0, 1.0);
+}#version 300 es
+// caustics_lookup.glsl -- the consumer side: waveCaustic(entryXZ, depth, lod) is a
+// direct-sun multiplier with mean ~1. Textures are mipmapped and repeat, tiling every
+// 12 m. entryXZ is where the flat-water refracted sun ray through the shaded point
+// crosses the surface: P.xz + rs.xz / rs.y * depth, rs = refract(-sun, up, 1/1.33).
+uniform sampler2D uCaustics;      // 512^2, depth 1.5 m, in .r
+uniform sampler2D uCausticsDeep;  // 256^2, depths 4 m and 10 m, in .r and .g
+const float CAUSTIC_TEXELS_PER_M = 42.6666667;   // 512 / 12
+
+float waveCaustic(vec2 entryXZ, float depth, float lod) {
+  vec2 uv = entryXZ * 0.0833333;   // 1 / 12 m
+  float v = textureLod(uCaustics, uv, lod).r;
+  if (depth > 1.5) {
+    // deep texels are half the near ones; past the deepest slice keep it, one mip blurrier
+    // per doubling of depth
+    vec2 d = textureLod(uCausticsDeep, uv, max(lod - 1.0, 0.0) + log2(max(depth / 10.0, 1.0))).rg;
+    v = depth < 4.0 ? mix(v, d.r, (depth - 1.5) / 2.5)
+                    : mix(d.r, d.g, clamp((depth - 4.0) / 6.0, 0.0, 1.0));
+  }
+  return mix(1.0, v, clamp(depth / 1.5, 0.0, 1.0));   // no caustic at zero depth
+}#version 300 es
+// composite.frag -- assemble the frame, in LINEAR HDR. The grade (exposure, tone map,
+// bloom, contrast, saturation, sRGB) is grade.frag's job now, because bloom and
+// auto-exposure both need values before the tone map -- see that file.
+//
+// The water pass tags what it covered instead of blending, because the surface needs to
+// know what is BEHIND it (refraction) before it can be shaded: alpha 2 = top side, 0 =
+// underside, 1 = no water (the clear value). Edge pixels average between tags, hence the
+// step() tests rather than an equality.
+uniform sampler2D uColor;      // opaque scene + sky, .a = linear view depth
+uniform sampler2D uWater;      // water surface, .a = tag
+uniform sampler2D uSpray;      // additive spray
+uniform sampler2D uShafts;     // quarter-res in-scattered sun, .a = ray length
+uniform sampler2D uLens;       // near-plane depth below the surface
+uniform vec3 uAbsorption;
+uniform vec3 uScatterColor;
+uniform vec3 uSunColor;
+uniform vec4 uUnder;           // scattering (1/m), shaft strength, -, -
+uniform float uFull;           // 1: the whole near plane is submerged
+uniform float uActive;         // 1: the lens map is valid this frame
+in vec2 vUV;
+out vec4 fragColor;
+
+void main() {
+  // NO FLIP HERE ANY MORE, and none anywhere else: measured, not reasoned. This pass used
+  // to carry one because it wrote the drawable, and a frame read back through
+  // `drawToBitmapData` is the same as the window -- so the flip was real, not a caption
+  // for a readback artefact. Now that this pass writes `_hdr` and grade.frag writes the
+  // drawable, the chain is row-preserving end to end: this pass samples its sources at
+  // `vUV` and the grade samples `uHdr` at `vUV`, and the result matches the pre-refactor
+  // frame to a mean |diff| of 0.01/255 across the whole frame (the half-float round trip).
+  // Keeping the old flip in the composite, or moving it to the grade, both came out
+  // upside down -- one flip too many.
+  vec2 uv = vUV;
+  vec4 o = textureLod(uColor, uv, 0.0);
+  vec4 w = textureLod(uWater, uv, 0.0);
+
+  float under = uFull > 0.5 ? 1.0 : (uActive > 0.5 ? step(0.5, texture(uLens, uv).r) : 0.0);
+  // Tag 1 means "no water here" (the clear value), 0 is the underside and 2 the top
+  // side, so the surface is present when the tag is NOT near 1. Testing `> 0.5` read
+  // the open tag as water and painted the sky with the empty water target's black.
+  bool isWater = abs(w.a - 1.0) > 0.5;
+
+  vec3 col = isWater ? w.rgb : o.rgb;
+
+  // underwater absorption of what is behind the camera-facing surface. The water pass
+  // already absorbed along its own refracted ray; this is the column from the camera to
+  // the seabed, island or water surface itself.
+  if (under > 0.5 && !isWater) {
+    vec3 T = exp(-uAbsorption * o.a);
+    col = col * T + uScatterColor * (1.0 - T) * 0.55;
+    vec4 sh = texture(uShafts, uv);
+    float guard = exp(-abs(sh.a - o.a) * 0.5);
+    col += uSunColor * sh.rgb * uUnder.y * guard;
+  }
+
+  col += texture(uSpray, uv).rgb;
+
+  // Linear HDR out: grade.frag applies exposure, the tone map and the transfer function.
+  // The alpha is unused downstream (the tag was consumed above), but it is written as 1
+  // so a dump of this target is not mistaken for the water pass's tag convention.
+  fragColor = vec4(col, 1.0);
+}#version 300 es
+// grade.frag -- the last pass: exposure (auto or fixed), bloom, filmic tone map, the
+// author's grade, and the sRGB encode, straight into the back buffer.
+//
+// WHY THIS IS NOT PART OF composite.frag ANY MORE. Bloom and auto-exposure both need the
+// frame BEFORE the tone map: a threshold on display-referred values (max 1.0) finds
+// nothing, and metering a tonemapped frame measures the curve rather than the scene.
+// composite.frag therefore stops at linear HDR in `_hdr`, and this pass is the only place
+// where linear light becomes display-referred -- which is also why it is the only pass
+// that encodes sRGB.
+//
+// THE FLIP IS NOT HERE. composite.frag already flipped its own sampling when it wrote
+// `_hdr` (the flip that makes the frame upright in the drawable), so this pass samples
+// `_hdr` straight through and writes straight out: exactly one vertical flip exists in the
+// chain, and it stayed where it was measured correct.
+uniform sampler2D uHdr;     // linear HDR, pre-grade
+uniform sampler2D uBloom;   // level 0 of the bloom pyramid
+uniform sampler2D uExpo;    // 1x1: adapted log2 average luminance
+uniform float uExposure;    // exposure compensation (auto) or absolute exposure
+uniform float uAuto;        // 1 = auto exposure
+uniform vec3 uExpoRange;    // keyValue, minExposure, maxExposure
+uniform float uBloomStrength;
+uniform float uContrast;
+uniform float uSaturation;
+uniform float uVignette;
+uniform vec2 uDstTexel;     // 1 / drawable size, for the supersample box
+uniform float uSuper;       // 1 = the HDR target is larger than the drawable
+in vec2 vUV;
+out vec4 fragColor;
+
+const mat3 ACES_IN = mat3(0.59719, 0.07600, 0.02840,
+                          0.35458, 0.90834, 0.13383,
+                          0.04823, 0.01566, 0.83777);
+const mat3 ACES_OUT = mat3(1.60475, -0.10208, -0.00327,
+                           -0.53108, 1.10813, -0.07276,
+                           -0.07367, -0.00605, 1.07602);
+
+vec3 aces(vec3 c) {
+  vec3 v = ACES_IN * c;
+  vec3 a = v * (v + 0.0245786) - 0.000090537;
+  vec3 b = v * (0.983729 * v + 0.4329510) + 0.238081;
+  return clamp(ACES_OUT * (a / b), 0.0, 1.0);
+}
+
+vec3 toSrgb(vec3 c) {
+  vec3 lo = c * 12.92;
+  vec3 hi = 1.055 * pow(max(c, vec3(1e-5)), vec3(1.0 / 2.4)) - 0.055;
+  return mix(lo, hi, step(vec3(0.0031308), c));
+}
+
+void main() {
+  // No flip: see the note in composite.frag. The composite's old flip went away when the
+  // grade took over the drawable write, and the frame was verified upright against the
+  // pre-refactor pipeline rather than against a screenshot.
+  vec2 uv = vUV;
+  vec3 hdr = texture(uHdr, uv).rgb;
+  if (uSuper > 0.5) {
+    // The HDR target is bigger than the window (quality: render scale > 1), so this is
+    // the resize filter, and a single bilinear tap is a 2x2 average only on the diagonal.
+    // Four taps at half a DESTINATION texel put a 2x2 block's worth of source texels in
+    // each quadrant: the same job MSAA does at the geometry stage, done at the last pass.
+    vec2 o = uDstTexel * 0.5;
+    hdr = (texture(uHdr, uv + vec2(-o.x, -o.y)).rgb + texture(uHdr, uv + vec2(o.x, -o.y)).rgb
+         + texture(uHdr, uv + vec2(-o.x, o.y)).rgb + texture(uHdr, uv + vec2(o.x, o.y)).rgb) * 0.25;
+  }
+  // Only sampled when it is actually used: a bloom strength of 0 skips the pyramid
+  // pass entirely, and an unwritten half-float target holds whatever the driver left
+  // there -- a single NaN texel is enough to turn the whole frame black through
+  // `NaN * 0.0`. Guarding the sample is cheaper and truer than clearing a target the
+  // pipeline never writes (Context3D.clear is deferred to the next draw anyway, see
+  // Context3D_clear).
+  vec3 bloom = uBloomStrength > 0.0 ? texture(uBloom, uv).rgb : vec3(0.0);
+
+  float ex = uExposure;
+  if (uAuto > 0.5) {
+    // metered exposure = key / geometric-mean luminance, clamped to the panel's range
+    ex *= clamp(uExpoRange.x * exp2(-texelFetch(uExpo, ivec2(0), 0).r), uExpoRange.y, uExpoRange.z);
+  }
+
+  vec3 col = (hdr + bloom * uBloomStrength) * ex;
+  col = aces(col);
+
+  // the author's grade, in display-referred light: contrast is a gamma on the tonemapped
+  // value (the reference's AgX look does the same), saturation a pull towards luma
+  col = pow(max(col, vec3(0.0)), vec3(uContrast));
+  float l = dot(col, vec3(0.2126, 0.7152, 0.0722));
+  col = max(l + uSaturation * (col - l), vec3(0.0));
+
+  vec2 q = vUV - 0.5;
+  col *= 1.0 - uVignette * dot(q, q);
+  fragColor = vec4(toSrgb(col), 1.0);
+}#version 300 es
+// lens.frag -- how far the near plane is BELOW the rendered surface, on a 64x36 grid.
+// A wave washing over the camera therefore splits the screen at the exact waterline
+// instead of switching the whole post effect on when camera.y crosses zero.
+uniform mat4 uInvProj;
+uniform mat4 uCamWorld;
+in vec2 vUV;
+out vec4 fragColor;
+
+void main() {
+  vec4 v = uInvProj * vec4(vUV * 2.0 - 1.0, -1.0, 1.0);
+  vec3 nearW = (uCamWorld * vec4(v.xyz / v.w, 1.0)).xyz;
+  fragColor = vec4(waterAt(nearW.xz, vec3(0.0)).y - nearW.y, 0.0, 0.0, 1.0);
+}#version 300 es
+// meter.frag -- auto-exposure step 1/2: the HDR frame down to a 32x32 grid of
+// log2(luminance), ported from Ultra-Water PostFX.js (`METER_FRAG`).
+//
+// Each texel averages 4x4 bilinear taps across its own footprint (the frame is 32x larger
+// than this grid, so a single tap would sample one pixel in a thousand and the metering
+// would flicker with the glints). The grid is jittered per frame on an R2 sequence; the
+// temporal filter in adapt.frag averages that away.
+//
+// Luminance is clamped to [1e-4, 64] BEFORE the log so the sun disc and the glitter road
+// cannot pump the exposure: metering is about the scene, not about the brightest pixel.
+uniform sampler2D uSrc;
+uniform vec2 uJitter;   // [0,1)^2
+in vec2 vUV;
+out vec4 fragColor;
+
+void main() {
+  float s = 0.0;
+  for (int j = 0; j < 4; j++) {
+    for (int i = 0; i < 4; i++) {
+      vec2 o = (vec2(float(i), float(j)) + uJitter) * 0.25 - 0.5;
+      vec3 c = max(texture(uSrc, vUV + o * 0.03125).rgb, 0.0);   // 1/32: one meter texel
+      s += log2(clamp(dot(c, vec3(0.2126, 0.7152, 0.0722)), 1e-4, 64.0));
+    }
+  }
+  fragColor = vec4(s * (1.0 / 16.0), 0.0, 0.0, 1.0);
+}#version 300 es
+// ms.frag -- multiple-scattering LUT: 32x32, x = sun zenith cosine, y = altitude.
+// 64 directions x 20 quadratic samples each, summed as the geometric series
+// L2 / (1 - f_ms) (Hillaire eq. 10).
+in vec2 vUV;
+out vec4 fragColor;
+void main() {
+  vec2 uv = fromSub(vec2(vUV.x, 1.0 - vUV.y), vec2(32.0));
+  float muS = uv.x * 2.0 - 1.0, h = max(uv.y * (RT - RB), OBS_H);
+  float sinS = sqrt(max(1.0 - muS * muS, 0.0));
+  vec3 L = vec3(0.0), F = vec3(0.0), fms;
+  for (int j = 0; j < 8; j++) {
+    float mu = 1.0 - 2.0 * (float(j) + 0.5) / 8.0, sinV = sqrt(1.0 - mu * mu);
+    for (int i = 0; i < 8; i++) {
+      float nu = cos(2.0 * PI * (float(i) + 0.5) / 8.0) * sinV * sinS + mu * muS;
+      L += integrateMs(h, mu, muS, nu, 20, fms);
+      F += fms;
+    }
+  }
+  fragColor = vec4((L / 64.0) / max(1.0 - F / 64.0, vec3(1e-3)), 1.0);
+}#version 300 es
+// present.frag -- final copy from the composite's target to the back buffer. Both the
+// composite and this pass write through the same fullscreen quad, so the row order
+// already agrees end to end and no pass flips v.
+//
+// This is also where linear light becomes display-referred. The back buffer is a plain
+// BGRA8Unorm drawable, not an _sRGB view, so Metal does NOT encode on write: handing it
+// linear values and letting the display interpret them as sRGB crushes every midtone
+// (a 0.3 linear sea reads as 0.3 instead of 0.58). The composite works in linear light
+// all the way through, so the transfer function belongs here, once.
+uniform sampler2D uSrc;
+in vec2 vUV;
+out vec4 fragColor;
+
+vec3 toSrgb(vec3 c) {
+  vec3 lo = c * 12.92;
+  vec3 hi = 1.055 * pow(max(c, vec3(1e-5)), vec3(1.0 / 2.4)) - 0.055;
+  return mix(lo, hi, step(vec3(0.0031308), c));
+}
+
+void main() {
+  fragColor = vec4(toSrgb(textureLod(uSrc, vUV, 0.0).rgb), 1.0);
+}#version 300 es
+// quad.vert -- fullscreen triangle-pair. aPos is in [-1,1]; vUV is top-left origin in
+// the same orientation as a render-target texel (row 0 of a target is vUV.y = 0).
+layout(location = 0) in vec3 aPos;
+layout(location = 1) in vec2 aUv;
+out vec2 vUV;
+void main() {
+  vUV = aUv;
+  gl_Position = vec4(aPos.xy, 0.0, 1.0);
+}#version 300 es
+// shafts.frag -- single-scattered sun along the view ray, at quarter resolution. Light
+// entering the water carries the same wave caustics that light the seabed, so marching
+// them gives the god rays for free: rays that sweep across the pattern average to haze,
+// rays that run along the light keep their shafts.
+uniform mat4 uInvProj;
+uniform mat4 uCamWorld;
+uniform sampler2D uColor;      // the opaque pass; .a is its linear view depth
+uniform vec3 uSunDir;
+uniform vec3 uAbsorption;
+uniform vec4 uUnder;           // scattering coefficient (1/m), strength, shaft range (m), -
+const float PI = 3.14159265359;
+uniform float uFrame;          // frame index mod 64: rotates the march jitter
+in vec2 vUV;
+out vec4 fragColor;
+
+void main() {
+  vec4 o = texture(uColor, vUV);
+  vec4 vv = uInvProj * vec4(vUV * 2.0 - 1.0, 1.0, 1.0);
+  float dist = min(o.a, uUnder.z);
+  vec3 dir = normalize(mat3(uCamWorld) * (vv.xyz / vv.w));
+  vec3 camPos = uCamWorld[3].xyz;
+  vec3 sigT = uAbsorption + uUnder.x;
+  vec3 rs = refract(-uSunDir, vec3(0.0, 1.0, 0.0), 0.75188);
+  vec3 acc = vec3(0.0);
+  if (rs.y < -0.05) {
+    const int STEPS = 16;
+    float stepL = dist / float(STEPS);
+    // interleaved gradient noise, advanced by the golden ratio each frame
+    float jit = fract(52.9829189 * fract(dot(gl_FragCoord.xy, vec2(0.06711056, 0.00583715))) + uFrame * 0.618034);
+    float mu = dot(dir, -rs);
+    const float g = 0.7;
+    float phase = (1.0 - g * g) / (4.0 * PI * pow(1.0 + g * g - 2.0 * g * mu, 1.5)) + 0.04;
+    // prefilter along the ray: one step covers this much of the 12 m pattern
+    vec2 dbase = dir.xz - rs.xz / rs.y * dir.y;
+    float lod = max(log2(max(length(dbase) * stepL * CAUSTIC_TEXELS_PER_M, 1.0)), 1.0);
+    for (int i = 0; i < STEPS; i++) {
+      float s = (float(i) + jit) * stepL;
+      vec3 p = camPos + dir * s;
+      float pd = -p.y;
+      if (pd <= 0.0) continue;
+      vec2 entry = p.xz + rs.xz / max(rs.y, -0.05) * pd;
+      acc += waveCaustic(entry, pd, lod) * exp(-sigT * (s + pd / -rs.y)) * smoothstep(0.0, 0.6, pd);
+    }
+    acc *= phase * stepL;
+  }
+  fragColor = vec4(acc, dist);
+}#version 300 es
+// sim_assemble.frag -- from the transformed gradients to the two textures the surface
+// reads. displacement = (lambda*Dx, Dy, lambda*Dz, turbulence) and
+// slope = (sx, sz, sx*sx, sz*sz); the slopes are divided out at full resolution so their
+// mips give mean and second moment (that is what a LEAN-style roughness needs).
+//
+// turbulence is the Jacobian feedback term that makes foam follow a folding crest down
+// instantly and recover at a fixed rate: it needs the previous frame, so the pair of
+// targets ping-pongs and all four cascades share the parity.
+uniform highp sampler2D uIn0;
+uniform highp sampler2D uIn1;
+uniform sampler2D uPrev;
+uniform float uLambda;
+uniform float uDt;
+uniform float uFoamRecovery;
+layout(location = 0) out vec4 outDisp;
+layout(location = 1) out vec4 outSlope;
+
+void main() {
+  ivec2 id = ivec2(gl_FragCoord.xy);
+  ivec2 p = id;
+  // undo the centred-k frequency shift: a roll by N/2 multiplies the field by (-1)^(x+y)
+  float s = ((id.x + id.y) & 1) == 0 ? 1.0 : -1.0;
+  vec4 a = texelFetch(uIn0, p, 0) * s;   // Dx, Dz, Dy, Dxz
+  vec4 b = texelFetch(uIn1, p, 0) * s;   // Dyx, Dyz, Dxx, Dzz
+  float dxx = uLambda * b.z, dzz = uLambda * b.w, dxz = uLambda * a.w;
+  float jac = (1.0 + dxx) * (1.0 + dzz) - dxz * dxz;
+  // the geometric slope of a choppy surface: horizontal displacement compresses the grid,
+  // so the visible slope is the height gradient divided by the local Jacobian
+  vec2 slope = b.xy / max(vec2(1.0 + dxx, 1.0 + dzz), vec2(0.2));
+  float prev = texelFetch(uPrev, id, 0).w;
+  float turb = min(jac, prev + uDt * uFoamRecovery / max(jac, 0.5));
+  outDisp = vec4(uLambda * a.x, a.z, uLambda * a.y, turb);
+  outSlope = vec4(slope, slope * slope);
+}#version 300 es
+// sim_common.glsl -- constants and helpers the four FFT passes share. A faithful port
+// of Ultra-Water src/water/OceanSim.js: N=256 per cascade, four cascades stacked in one
+// 256x1024 atlas so every IFFT stage is a single draw.
+precision highp float;
+precision highp int;
+
+#define N 256
+#define PI 3.14159265359
+#define G 9.81
+#define ST 7.4e-5
+
+vec2 cmul(vec2 a, vec2 b) { return vec2(a.x * b.x - a.y * b.y, a.x * b.y + a.y * b.x); }
+// surface tension makes the dispersion relation non-linear in k: w^2 = g k + (sigma/rho) k^3
+float omega(float k) { return sqrt(G * k + ST * k * k * k); }#version 300 es
+// sim_evolve.frag -- advance the spectrum in time and turn it into the four real fields
+// the IFFT will carry. Two complex numbers per texel are packed into the two RGBA
+// attachments (out0 = (A.x, A.y, B.x, B.y)), so the 16 butterflies below transform four
+// real fields with one draw per stage instead of two.
+uniform highp sampler2D uH0;
+uniform vec4 uLength;
+uniform float uTime;
+uniform int uCascade;
+layout(location = 0) out vec4 out0;
+layout(location = 1) out vec4 out1;
+
+// IFFT(A + iB) = a + ib for two real fields packed as one complex spectrum
+vec2 pack2(vec2 a, vec2 b) { return vec2(a.x - b.y, a.y + b.x); }
+
+void main() {
+  ivec2 p = ivec2(gl_FragCoord.xy);
+  vec2 k = vec2(p - N / 2) * (2.0 * PI / uLength[uCascade]);
+  float kl = length(k);
+  float ik = kl > 1e-6 ? 1.0 / kl : 0.0;
+  // omega is quantised to multiples of 2*PI/LOOP and time wraps at LOOP, so the sea
+  // loops seamlessly and an fp32 phase never drifts
+  const float W0 = 2.0 * PI / 300.0;
+  float ph = 2.0 * PI * fract(floor(omega(kl) / W0) * (uTime / 300.0));
+  vec2 e = vec2(cos(ph), sin(ph));
+  vec4 h0 = texelFetch(uH0, p, 0);
+  vec2 h = cmul(h0.xy, e) + cmul(h0.zw, vec2(e.x, -e.y));
+  vec2 ih = vec2(-h.y, h.x);
+
+  // gradients come out of k-space: d/dx is i*kx, so the whole choppy displacement and its
+  // second moments cost one pass here and none at assemble time
+  vec2 dx = ih * k.x * ik, dz = ih * k.y * ik;
+  vec2 dxdx = -h * k.x * k.x * ik, dzdz = -h * k.y * k.y * ik, dxdz = -h * k.x * k.y * ik;
+  vec2 dydx = ih * k.x, dydz = ih * k.y;
+
+  out0 = vec4(pack2(dx, dz), pack2(h, dxdz));
+  out1 = vec4(pack2(dydx, dydz), pack2(dxdx, dzdz));
+}#version 300 es
+// sim_fft.frag -- one Stockham radix-2 inverse FFT stage (e^{+i}), verified against a
+// naive DFT. Reads two packed spectra and writes two, so the whole 4-field transform is
+// 16 draws (8 stages x horizontal/vertical) for all four cascades at once.
+uniform highp sampler2D uIn0;
+uniform highp sampler2D uIn1;
+uniform int uSub;       // sub-transform size, 2..N
+uniform int uVertical;  // 0 = rows, 1 = columns (inside each cascade block)
+layout(location = 0) out vec4 out0;
+layout(location = 1) out vec4 out1;
+
+void main() {
+  ivec2 p = ivec2(gl_FragCoord.xy);
+  int i = uVertical == 1 ? p.y : p.x;
+  int hs = uSub >> 1;
+  int e = (i / uSub) * hs + (i & (hs - 1));
+  ivec2 pe, po;
+  if (uVertical == 1) {
+    pe = ivec2(p.x, e);
+    po = ivec2(p.x, e + N / 2);
+  } else {
+    pe = ivec2(e, p.y);
+    po = ivec2(e + N / 2, p.y);
+  }
+  float a = 2.0 * PI * float(i & (uSub - 1)) / float(uSub);
+  vec2 tw = vec2(cos(a), sin(a));
+  vec4 e0 = texelFetch(uIn0, pe, 0), o0 = texelFetch(uIn0, po, 0);
+  vec4 e1 = texelFetch(uIn1, pe, 0), o1 = texelFetch(uIn1, po, 0);
+  out0 = vec4(e0.xy + cmul(tw, o0.xy), e0.zw + cmul(tw, o0.zw));
+  out1 = vec4(e1.xy + cmul(tw, o1.xy), e1.zw + cmul(tw, o1.zw));
+}#version 300 es
+// sim_init.frag -- the wind spectrum h0(k) for all four cascades, baked once (or whenever
+// the wind changes). JONSWAP frequency spectrum times a directional spreading function,
+// summed over the wind sea and the swell, each cascade band-limited by its cut frequency.
+uniform vec4 uSpecA[2];  // scale, angle, spreadBlend, swell
+uniform vec4 uSpecB[2];  // alpha, peakOmega, gamma, shortWavesFade
+uniform vec4 uLength;
+uniform vec4 uCut;       // upper cut frequency of cascades 0..2
+uniform float uCapFade;  // short-wave fade of the capillary cascade
+uniform int uCascade;    // which cascade this tile is (one texture per cascade, not an
+                         // atlas: a per-cascade mean-square-slope mip needs a 256x256
+                         // chain, and an atlas chain would average cascades together)
+uniform uint uSeed;
+out vec4 outColor;
+
+uvec2 pcg2d(uvec2 v) {
+  v = v * 1664525u + 1013904223u;
+  v.x += v.y * 1664525u; v.y += v.x * 1664525u;
+  v ^= v >> 16u;
+  v.x += v.y * 1664525u; v.y += v.x * 1664525u;
+  v ^= v >> 16u;
+  return v;
+}
+
+// Box-Muller from a counter-based hash: no texture, no state, so the spectrum is a pure
+// function of (texel, cascade, seed).
+vec2 gauss(ivec2 id, int c) {
+  uvec2 h = pcg2d(uvec2(id) + uvec2(uint(c) * 7919u, uint(c) * 104729u) + uSeed);
+  float u1 = (float(h.x) + 1.0) / 4294967296.0;
+  float u2 = float(h.y) / 4294967296.0;
+  float r = sqrt(-2.0 * log(u1));
+  return r * vec2(cos(2.0 * PI * u2), sin(2.0 * PI * u2));
+}
+
+float jonswap(float w, vec4 a, vec4 b) {
+  float wp = b.y;
+  float sigma = w <= wp ? 0.07 : 0.09;
+  float r = exp(-(w - wp) * (w - wp) / (2.0 * sigma * sigma * wp * wp));
+  float iw = 1.0 / w;
+  float q = wp * iw;
+  return a.x * b.x * G * G * iw * iw * iw * iw * iw * exp(-1.25 * q * q * q * q) * pow(b.z, r);
+}
+
+// normalisation of the cosine-2s spreading function, fitted over s (Hasselmann)
+float normalisation(float s) {
+  float s2 = s * s, s3 = s2 * s, s4 = s3 * s;
+  if (s < 5.0) return -0.000564 * s4 + 0.00776 * s3 - 0.044 * s2 + 0.192 * s + 0.163;
+  return -4.80e-08 * s4 + 1.07e-05 * s3 - 9.53e-04 * s2 + 5.90e-02 * s + 3.93e-01;
+}
+
+float directional(float theta, float w, vec4 a, vec4 b) {
+  float x = w / b.y;
+  float s = x > 1.0 ? 9.77 * pow(x, -2.5) : 6.97 * pow(x, 5.0);
+  s += 16.0 * tanh(min(x, 20.0)) * a.w * a.w;
+  float t = theta - a.y;
+  float cosine2s = normalisation(s) * pow(abs(cos(0.5 * t)), 2.0 * s);
+  return mix(2.0 / PI * cos(t) * cos(t), cosine2s, a.z);
+}
+
+vec2 h0(ivec2 id, int c) {
+  float L = uLength[c];
+  float dk = 2.0 * PI / L;
+  vec2 k = vec2(id - N / 2) * dk;
+  float kl = length(k);
+  float lo = c == 0 ? 1e-4 : uCut[c - 1];
+  float hi = c == 3 ? 1e4 : uCut[c];
+  if (kl < lo || kl > hi) return vec2(0.0);
+  float w = omega(kl);
+  float dwdk = (G + 3.0 * ST * kl * kl) / (2.0 * w);
+  float theta = atan(k.y, k.x);
+  float S = 0.0;
+  for (int i = 0; i < 2; i++) {
+    if (uSpecA[i].x <= 0.0) continue;
+    float fade = c == 3 ? uCapFade : uSpecB[i].w;
+    S += jonswap(w, uSpecA[i], uSpecB[i]) * directional(theta, w, uSpecA[i], uSpecB[i])
+       * exp(-fade * fade * kl * kl);
+  }
+  return gauss(id, c) * sqrt(2.0 * S * dwdk / kl * dk * dk);
+}
+
+void main() {
+  ivec2 id = ivec2(gl_FragCoord.xy);
+  int c = uCascade;
+  vec2 a = h0(id, c);
+  vec2 b = h0((N - id) % N, c);
+  // Hermitian symmetry: h(-k) is the complex conjugate, so the IFFT comes out real
+  outColor = vec4(a, b.x, -b.y);
+}#version 300 es
+// sky.frag -- background sky: baked sky-view LUT + analytic sun disc + one cloud deck.
+// Ported from Ultra-Water src/scene/sky.js (CUBE_FRAG / BG_FRAG). The sun disc stays out
+// of the LUT so it can be as tight as it needs to be; alpha 1 means "sky covered this
+// pixel" for the passes that composite over it.
+uniform vec3 uSunDir;
+uniform vec3 uSunColor;
+uniform float uSunIllum;
+uniform float uCloudCoverage;
+uniform float uAlpha;   // opaque pass: 1e4 (far depth); reflection pass: 0 (no coverage)
+in vec3 vDir;
+out vec4 fragColor;
+
+const float CLOUD_H = 2.5;                      // cloud deck altitude (km)
+const vec3 WATER = vec3(0.02, 0.035, 0.045);    // deep-water body reflectance
+
+// value noise (three's Sky.js gradient/hash), static in time
+vec2 gradient(vec2 i) {
+  vec3 p = fract(i.xyx * vec3(0.1031, 0.1030, 0.0973));
+  p += dot(p, p.yzx + 33.33);
+  return fract((p.xx + p.yz) * p.zy) * 2.0 - 1.0;
+}
+float noise(vec2 p) {
+  vec2 i = floor(p), f = fract(p);
+  vec2 u = f * f * f * (f * (f * 6.0 - 15.0) + 10.0);
+  float a = dot(gradient(i), f);
+  float b = dot(gradient(i + vec2(1.0, 0.0)), f - vec2(1.0, 0.0));
+  float c = dot(gradient(i + vec2(0.0, 1.0)), f - vec2(0.0, 1.0));
+  float d = dot(gradient(i + vec2(1.0, 1.0)), f - vec2(1.0, 1.0));
+  return mix(mix(a, b, u.x), mix(c, d, u.x), u.y) * 1.6;
+}
+float fbm(vec2 p) {
+  float s = 0.0, a = 1.0;
+  for (int i = 0; i < 4; i++) { s += a * noise(p); a *= 0.5; p *= 2.0; }
+  return s;
+}
+
+void main() {
+  vec3 d = normalize(vDir);
+  vec3 up = skyView(vec3(0.0, 1.0, 0.0), uSunDir);
+
+  if (d.y < 0.0) {
+    // below the horizon: the sea. Fresnel between the mirrored sky and a dark body, so
+    // the bottom of the frame never shows a bright band past the last ocean ring.
+    float F = 0.02 + 0.98 * pow(1.0 + d.y, 5.0);
+    vec3 body = WATER * (uSunColor * max(uSunDir.y, 0.0) + up);
+    fragColor = vec4(mix(body, skyView(vec3(d.x, -d.y, d.z), uSunDir), F), uAlpha);
+    return;
+  }
+
+  vec3 col = skyView(d, uSunDir);
+  float vis = 1.0;
+  if (d.y > 1e-3 && uCloudCoverage > 0.0) {
+    vec2 p = d.xz / d.y * 0.396;
+    float n = clamp(fbm(p) * 0.7 + 0.5, 0.0, 1.0);
+    float th = 1.0 - clamp(uCloudCoverage + noise(p * 0.3) * 0.222, 0.0, 1.0);
+    float fade = smoothstep(0.0, 0.063, d.y);
+    float mask = smoothstep(th, th + 0.3, n) * fade;
+    float depth = max(0.0, n - th);
+    float beer = exp(-4.0 * depth);
+    float shade = mix(0.45, 1.0, clamp(beer * (1.0 - beer * beer) * 2.6, 0.0, 1.0));
+    float c = dot(d, uSunDir);
+    float silver = clamp(0.51 / pow(1.49 - c * 1.4, 1.5), 0.0, 3.0);
+    float edge = mask * (1.0 - mask) * 4.0;
+    float alpha = (1.0 - exp(-depth * 6.6)) * fade;
+
+    float r0 = RB + OBS_H, rc = RB + CLOUD_H;
+    float t = -r0 * d.y + sqrt(r0 * r0 * d.y * d.y + (rc - r0) * (rc + r0));
+    float muV = (r0 * d.y + t) / rc;
+    float muS = clamp((r0 * uSunDir.y + t * c) / rc, -1.0, 1.0);
+    vec3 sun = uSunIllum * transmittance(CLOUD_H, muS) * sunVisible(CLOUD_H, rc, muS) * 0.22;
+    vec3 cloud = up + sun * (shade + silver * edge * 0.6);
+    vec3 tv = clamp(transmittance(OBS_H, d.y) / max(transmittance(CLOUD_H, muV), vec3(1e-4)), 0.0, 1.0);
+    col = mix(col, mix(col, cloud, tv), alpha);
+    vis = 1.0 - alpha;
+  }
+
+  // 0.27 deg disc with limb darkening plus a tight glow, hidden behind clouds
+  float c = dot(d, uSunDir);
+  float disc = smoothstep(0.999985, 0.999992, c) * (0.6 + 0.4 * smoothstep(0.999985, 1.0, c));
+  col += uSunColor * (disc * 900.0 + pow(max(c, 0.0), 2200.0) * 1.5) * vis;
+  // .a is the opaque pass's linear view depth (see terrain.frag). The sky has none,
+  // and 1e4 m is far past any geometric depth, so it neither occludes the water nor
+  // absorbs anything under it.
+  fragColor = vec4(col, uAlpha);
+}#version 300 es
+// sky.vert -- the background pass. The world ray for each corner is built from three
+// vectors the host uploads (forward, and the half-extents of the frustum at unit depth),
+// so no matrix has to be inverted per vertex. gl_Position.z = w pins the quad to the far
+// plane, so the sky only shades the pixels no geometry wrote.
+layout(location = 0) in vec3 aPos;
+uniform vec3 uRayFwd;
+uniform vec3 uRayRight;
+uniform vec3 uRayUp;
+out vec3 vDir;
+void main() {
+  vDir = uRayFwd + uRayRight * aPos.x + uRayUp * aPos.y;
+  gl_Position = vec4(aPos.xy, 1.0, 1.0);
+}
+#version 300 es
+// sky_lut.frag -- the sky-view LUT: 192x108, the observer at sea level. u = sqrt of the
+// azimuth cosine to the sun, v = sqrt(elevation/90deg); integrated once whenever the sun
+// or the air changes, then every per-pixel sky lookup is one texture fetch.
+uniform float uSunMu;
+uniform float uSunIllum;
+in vec2 vUV;
+out vec4 fragColor;
+void main() {
+  vec2 uv = fromSub(vec2(vUV.x, 1.0 - vUV.y), SKY_RES);
+  float cosPhi = 1.0 - 2.0 * uv.x * uv.x, elev = 0.5 * PI * uv.y * uv.y;
+  float mu = sin(elev), cosE = cos(elev);
+  vec3 v = vec3(cosE * cosPhi, mu, cosE * sqrt(max(1.0 - cosPhi * cosPhi, 0.0)));
+  vec3 s = vec3(sqrt(max(1.0 - uSunMu * uSunMu, 0.0)), uSunMu, 0.0);
+  vec3 fms;
+  fragColor = vec4(integrate(OBS_H, mu, uSunMu, dot(v, s), 32, fms) * uSunIllum, 1.0);
+}#version 300 es
+// spray.frag -- additive billboard; the sun's colour comes in pre-multiplied, so the
+// blend is simply one/one.
+uniform vec3 uSprayColor;
+in vec2 vCorner;
+in float vFade;
+out vec4 fragColor;
+
+void main() {
+  if (vFade <= 0.001) discard;
+  float r = length(vCorner);
+  float a = smoothstep(1.0, 0.15, r) * vFade;
+  fragColor = vec4(uSprayColor * a, a);
+}#version 300 es
+// spray.vert -- spindrift off the crests, drawn as camera-facing quads.
+//
+// There is no particle system here on purpose: each quad carries a FIXED emitter in xz
+// and a phase in .zw, and the whole trajectory (launch height, arc, drift, fade) is a
+// function of that phase. The CPU uploads the emitter table once, the vertex program
+// decides which droplets are alive this frame by looking up the surface height at the
+// emitter -- so a passing wave lights up a whole band of spray without a single buffer
+// update. That is the same "the sea is a function, sample it" trick the rest of the
+// pipeline uses.
+layout(location = 0) in vec3 aPos;    // quad corner, -1..1
+layout(location = 1) in vec4 aColor;  // emitter xz (box coords), seed, phase
+uniform sampler2D uDisp0;
+uniform sampler2D uDisp1;
+uniform vec4 uLength;
+uniform mat4 projectionMatrix;
+uniform mat4 viewMatrix;
+uniform vec4 uSpray;      // size (m), lifetime (s), launch speed (m/s), threshold (m)
+uniform vec4 uSprayBox;   // origin xz, radius (m), rate (1/s)
+uniform vec2 uWind;
+uniform float uTime;
+out vec2 vCorner;
+out float vFade;
+
+void main() {
+  vec2 p0 = uSprayBox.xy + aColor.xy * uSprayBox.z;
+  float ph = fract(uTime * uSprayBox.w + aColor.w);
+  vec3 d = textureLod(uDisp0, p0 / uLength.x, 0.0).xyz
+         + textureLod(uDisp1, p0 / uLength.y, 0.0).xyz;
+  // only crests throw spray; the ramp keeps the population from popping on all at once
+  float amp = smoothstep(uSpray.w, uSpray.w + 0.9, d.y);
+
+  float t = ph * uSpray.y;
+  vec3 w = vec3(p0.x + d.x, d.y, p0.y + d.z);
+  w.y += uSpray.z * t - 4.9 * t * t;
+  w.xz += uWind * (t * t * 1.2);
+
+  float size = uSpray.x * (1.0 - ph * 0.7) * amp;
+  // billboard from the view matrix's own axes (its rows are the camera's world axes)
+  vec3 camRight = vec3(viewMatrix[0][0], viewMatrix[1][0], viewMatrix[2][0]);
+  vec3 camUp    = vec3(viewMatrix[0][1], viewMatrix[1][1], viewMatrix[2][1]);
+  w += camRight * aPos.x * size + camUp * aPos.y * size;
+
+  vCorner = aPos.xy;
+  vFade = amp * (1.0 - ph) * (1.0 - ph);
+  gl_Position = projectionMatrix * viewMatrix * vec4(w, 1.0);
+}#version 300 es
+// terrain.frag -- sand/rock shading for the seabed and the islands, with wave caustics
+// where the surface is overhead and Beer-Lambert absorption when the camera is below the
+// waterline. Ported from the terrain half of Ultra-Water's surface pass: the caustic
+// entry point is registered to the surface, so looking straight down and looking along
+// the sun do not give the same pattern.
+uniform vec3 uSunDir;
+uniform vec3 uSunColor;
+uniform vec3 uSkyAmbient;   // kept for the ambient of the reflection pass, where the
+                            // sky LUT is not bound (the mirror only needs albedo)
+uniform vec3 uAbsorption;
+uniform vec3 uScatterColor;
+uniform vec3 uSand;
+uniform vec3 uRock;
+uniform float uCausticStrength;  // 0 for anything that is always above water
+uniform float uReflPass;         // 1 inside the planar-reflection pass
+in vec3 vWorld;
+in vec3 vNormal;
+in float vViewZ;
+out vec4 fragColor;
+
+void main() {
+  // The reflection is the world seen in a mirror at y=0, so only what is ABOVE the
+  // water can appear in it. Discarding here is the exact equivalent of the reference's
+  // oblique near plane, and it costs one compare instead of a projection matrix rebuild.
+  if (uReflPass > 0.5 && vWorld.y < 0.0) discard;
+  vec3 N = normalize(vNormal);
+  float depth = max(-vWorld.y, 0.0);
+  // slope decides sand vs rock: the dunes are shallow, the island cliffs are not
+  float flat_ = smoothstep(0.55, 0.95, N.y);
+  vec3 albedo = mix(uRock, uSand, flat_);
+
+  float NoL = max(dot(N, uSunDir), 0.0);
+  // Ambient from the baked sky at its coarsest level -- that level IS the sky's
+  // irradiance. A constant 0.4 read as a night sea at sunset, when the sky the sand
+  // actually sees is an order of magnitude brighter than its zenith radiance.
+  vec3 ambient = skyViewLod(N, uSunDir, 5.0) * vec3(2.75, 2.5, 2.1);   // radiance -> irradiance
+  vec3 col = albedo * (ambient + uSunColor * NoL);
+
+  if (uCausticStrength > 0.0 && depth > 0.0) {
+    // where the flat-water refracted sun ray through this point crosses the surface
+    vec3 rs = refract(-uSunDir, vec3(0.0, 1.0, 0.0), 0.75188);
+    vec2 entry = vWorld.xz + rs.xz / max(rs.y, 0.05) * depth;
+    // one caustic texel is 2.3 cm; blur it once it is smaller than a pixel
+    float lod = max(0.0, log2(max(fwidth(entry.x), fwidth(entry.y)) * 42.6667));
+    float c = waveCaustic(entry, depth, lod);
+    // mip 1: an RTT target has no MSAA in this backend, so a single sub-texel sliver is
+    // point-sampled as one bead instead of a line. Half a mip of blur costs nothing at
+    // this scale and keeps the caustic lines continuous (see three-api-design.md §39).
+    c = mix(c, waveCaustic(entry, depth, lod + 1.0), 0.45);
+    col += albedo * uSunColor * NoL * (c - 1.0) * uCausticStrength;
+  }
+
+  // Absorption of the water column is applied in the composite, not here: the camera
+  // can straddle the surface, so "how much water is between me and this pixel" is a
+  // per-pixel question that only the composite's lens map can answer.
+  fragColor = vec4(col, uReflPass > 0.5 ? 1.0 : vViewZ);
+}#version 300 es
+// terrain.vert -- seabed and island meshes. Everything is in world space, so the model
+// matrix is identity and the shader only needs the view matrix.
+//
+// The alpha channel this pass writes is NOT opacity: the opaque pass stores its linear
+// view depth there, because the water and composite passes have to know what is behind
+// them and a depth attachment cannot be sampled through this channel.
+layout(location = 0) in vec3 position;
+layout(location = 1) in vec3 normal;
+uniform mat4 projectionMatrix;
+uniform mat4 viewMatrix;
+out vec3 vWorld;
+out vec3 vNormal;
+out float vViewZ;
+
+void main() {
+  vWorld = position;
+  vNormal = normal;
+  vec4 vp = viewMatrix * vec4(position, 1.0);
+  vViewZ = -vp.z;
+  gl_Position = projectionMatrix * vp;
+}#version 300 es
+// trans.frag -- transmittance LUT: 256x64, x = distance along the ray (Bruneton
+// parameterisation), y = sqrt(r^2 - RB^2) i.e. altitude.
+in vec2 vUV;
+out vec4 fragColor;
+void main() {
+  // row 0 of a render target is the TOP of the frame, but a fullscreen quad's v runs 0 at
+  // the bottom; every LUT bake therefore parameterises on a flipped v so that v = 0 in the
+  // stored texture really is the v = 0 end of the parameterisation its samplers assume.
+  vec2 uv = vec2(vUV.x, 1.0 - vUV.y);
+  float rho = H_TOP * uv.y;
+  float r = sqrt(rho * rho + RB * RB), h = rho * rho / (r + RB);
+  float dMin = RT - r, d = mix(dMin, rho + H_TOP, uv.x);
+  float mu = d <= 0.0 ? 1.0 : clamp((H_TOP * H_TOP - rho * rho - d * d) / (2.0 * r * d), -1.0, 1.0);
+  vec3 od = vec3(0.0);
+  for (int i = 0; i < 40; i++) {
+    float fi = float(i), rr;
+    od += medium(altAt(h, mu, d * (fi + 0.5) * (fi + 0.5) / 1600.0, rr)).ext * (2.0 * fi + 1.0);
+  }
+  fragColor = vec4(exp(-od * (d / 1600.0)), 1.0);
+}#version 300 es
+// water.frag -- the ocean surface, shaded from the cascade slopes.
+//
+// MODELLED ON Ultra-Water src/water/OceanSurface.js (FRAG), minus the parts this stage
+// has no input for yet (shore map, shore waves, impacts, cascaded shadows): what is kept
+// is the part that decides whether the water reads as water -- slope sum with per-cascade
+// variance, geometric specular AA from dFdx/dFdy, screen-space refraction through the
+// opaque depth with Beer-Lambert absorption, Fresnel-mixed planar reflection, foam from
+// the displacement Jacobian, and the sun's GGX lobe.
+//
+// The pass is DEFERRED-ish: it draws with no depth attachment and rejects itself where
+// the opaque pass made a nearer fragment (uOpaque.a is that pass's linear view depth).
+// That is what lets it sample uOpaque for refraction without reading a texture it is
+// writing, which is the whole reason the opaque scene has its own target.
+uniform vec3 cameraPosition;   // auto-uploaded by the renderer
+uniform mat4 viewMatrix;       // ditto (view-space depth + reflection distortion)
+uniform sampler2D uDisp0;
+uniform sampler2D uDisp1;
+uniform sampler2D uDisp2;
+uniform sampler2D uSlope0;
+uniform sampler2D uSlope1;
+uniform sampler2D uSlope2;
+uniform sampler2D uSlope3;
+uniform sampler2D uOpaque;      // rgb = opaque scene, a = its linear view depth
+uniform sampler2D uReflection;  // half-res mirrored scene
+
+uniform vec4 uLength;
+uniform vec4 uOptics;     // base roughness, refraction, reflection distortion, -
+uniform vec4 uFoam;       // bias, scale, foam tint, -
+uniform vec3 uSunDir;
+uniform vec3 uSunColor;
+uniform vec3 uAbsorption;
+uniform vec3 uScatterColor;
+uniform vec3 uSkyAmbient;
+uniform vec3 uCamForward;
+uniform float uGlint;
+uniform float uCamSide;   // -1 above the surface, +1 below
+const float PI = 3.14159265359;
+
+in vec3 vWorld;
+in vec2 vXZ;
+in float vUnresolved;
+in vec2 vScreenUv;
+in float vViewZ;
+out vec4 fragColor;
+
+void main() {
+  vec2 uv = vScreenUv;
+  float waterZ = vViewZ;
+  vec4 op = textureLod(uOpaque, uv, 0.0);
+  // Manual depth test: the opaque scene is in front of this water fragment.
+  if (op.a < waterZ) discard;
+
+  vec3 toCam = cameraPosition - vWorld;
+  float dist = length(toCam);
+  vec3 V = toCam / max(dist, 1e-4);
+
+  // --- slopes and their variance ------------------------------------------------
+  vec4 s0 = texture(uSlope0, vXZ / uLength.x);
+  vec4 s1 = texture(uSlope1, vXZ / uLength.y);
+  vec4 s2 = texture(uSlope2, vXZ / uLength.z);
+  vec4 s3 = texture(uSlope3, vXZ / uLength.w);
+  vec2 slope = s0.xy + s1.xy + s2.xy + s3.xy;
+  vec2 variance = max(s0.zw - s0.xy * s0.xy, 0.0) + max(s1.zw - s1.xy * s1.xy, 0.0)
+                + max(s2.zw - s2.xy * s2.xy, 0.0) + max(s3.zw - s3.xy * s3.xy, 0.0);
+  vec3 Nrm = normalize(vec3(-slope.x, 1.0, -slope.y));
+
+  // the normal's tilt as a screen offset: project a small world step along it
+  vec3 vp = (viewMatrix * vec4(vWorld, 1.0)).xyz;
+  vec3 dv = mat3(viewMatrix) * vec3(Nrm.x, 0.0, Nrm.z);
+  vec2 nS = dv.xy - vp.xy / vp.z * dv.z;
+
+  // geometric specular AA (Kaplanyan): the normal's change across the pixel is roughness
+  vec3 dndx = dFdx(Nrm), dndy = dFdy(Nrm);
+  float geoVar = min(0.25 * (dot(dndx, dndx) + dot(dndy, dndy)), 0.18);
+  float alpha = sqrt(max(uOptics.x * uOptics.x + vUnresolved + variance.x + variance.y + geoVar, 1e-5));
+
+  float NoV = max(dot(Nrm, V), 1e-4);
+  float NoL = dot(Nrm, uSunDir);
+
+  // --- foam: the Jacobian of the choppy displacement ----------------------------
+  float t0 = texture(uDisp0, vXZ / uLength.x).w;
+  float t1 = texture(uDisp1, vXZ / uLength.y).w;
+  float t2 = texture(uDisp2, vXZ / uLength.z).w;
+  float jac = t0 + t1 + t2 - 2.0;
+  float foam = clamp((uFoam.x - jac) * uFoam.y, 0.0, 1.0);
+
+  // --- seen from below: Snell's window and total internal reflection -------------
+  // Outside the window the surface mirrors the deep water; inside it, the sky above
+  // comes through a ~97 degree cone. The edge is widened by the sub-pixel roughness so
+  // a rough patch fades between the two instead of switching.
+  if (!gl_FrontFacing) {
+    float cosI = dot(V, -Nrm);
+    const float COS_CRIT = 0.6614;  // sqrt(1 - 1/1.33^2)
+    float edge = max(alpha * 1.5, 0.02);
+    float win = smoothstep(COS_CRIT - edge, COS_CRIT + edge, cosI);
+    vec3 deep = uScatterColor * (uSkyAmbient + uSunColor * max(uSunDir.y, 0.0)) * 0.55;
+    vec3 above = uSkyAmbient + uSunColor * pow(max(dot(-V, uSunDir), 0.0), 48.0) * 0.6;
+    vec3 c2 = mix(deep, above, win) * (1.0 - 0.55 * foam);
+    // the column from the camera to the surface itself
+    vec3 Tu = exp(-uAbsorption * dist);
+    fragColor = vec4(c2 * Tu + uScatterColor * (1.0 - Tu) * 0.55, 0.0);
+    return;
+  }
+
+  // --- refraction + absorption through the water column -------------------------
+  float thick = max(op.a - waterZ, 0.0) / max(dot(-V, uCamForward), 0.05);
+  vec2 ruv = uv + nS * uOptics.y * clamp(thick * 0.25, 0.0, 1.0) / max(waterZ * 0.02, 1.0);
+  ruv = clamp(ruv, vec2(0.002), vec2(0.998));
+  vec4 rp = textureLod(uOpaque, ruv, 0.0);
+  if (rp.a < waterZ) rp = op;                       // offset landed in front: no offset
+  vec3 absorb = exp(-uAbsorption * thick);
+  vec3 through = rp.rgb * absorb + uScatterColor * (1.0 - absorb);
+
+  // --- planar reflection --------------------------------------------------------
+  float F = 0.02 + 0.98 * pow(1.0 - NoV, 5.0);
+  // The reflection target is the scene seen by the camera mirrored about y = 0. A point
+  // ON the plane projects to the same screen position in both cameras, so the fragment's
+  // OWN screen uv is the sampling coordinate -- the mirrored camera's matrices never have
+  // to be uploaded, and the old uReflMatrix path (which was never set, so rc.w was ~0)
+  // cannot silently sample the texture corner again.
+  float reflAmp = uOptics.z * 0.6 / (1.0 + dist * 0.04);
+  vec2 ref2 = uv + clamp(nS * reflAmp, vec2(-0.06), vec2(0.06));
+  float reflLod = clamp(log2(max(alpha * 24.0, 1.0)), 0.0, 4.0);
+  vec3 refl = textureLod(uReflection, clamp(ref2, vec2(0.002), vec2(0.998)), reflLod).rgb;
+
+  // --- sun: one GGX lobe, plus the glint that makes the horizon sparkle ----------
+  vec3 H = normalize(V + uSunDir);
+  float NoH = max(dot(Nrm, H), 0.0), VoH = max(dot(V, H), 0.0);
+  float a2 = alpha * alpha;
+  float dd = NoH * NoH * (a2 - 1.0) + 1.0;
+  float D = a2 / (PI * dd * dd);
+  float Fh = 0.02 + 0.98 * pow(1.0 - VoH, 5.0);
+  float kk = a2 * 0.5;
+  float Gl = (max(NoL, 0.0) / (max(NoL, 0.0) * (1.0 - kk) + kk)) * (NoV / (NoV * (1.0 - kk) + kk));
+  float spec = D * Fh * Gl / (4.0 * NoV * max(NoL, 1e-4)) * max(NoL, 0.0);
+  float glint = pow(NoH, 900.0) * uGlint;
+  vec3 sun = uSunColor * (spec + glint * 0.02) * (1.0 - foam * 0.7);
+
+  // --- subsurface: light coming through a crest --------------------------------
+  float crest = clamp(vWorld.y * 0.4, 0.0, 1.0);
+  float sss = crest * pow(max(dot(V, -uSunDir), 0.0), 3.0) * 0.8;
+
+  vec3 foamCol = (uSunColor * max(NoL, 0.0) * 0.35 + uSkyAmbient * 0.85) * uFoam.z;
+  vec3 body = mix(through, foamCol, foam * 0.85);
+  vec3 col = mix(body, refl, F) + sun + uScatterColor * sss * (0.3 + 0.7 * crest);
+  // tag 2 = top side: the composite must take this instead of the opaque scene
+  fragColor = vec4(col, 2.0);
+}#version 300 es
+// water.vert -- the ocean surface. Camera-centred polar grid (built on the CPU, position
+// in metres relative to the camera in xz), displaced by three cascade atlases.
+//
+// The per-vertex LOD is the whole trick: `cell` is the world size of this vertex's grid
+// cell, converted into cascade texels, so a vertex 2 km away samples a coarse mip instead
+// of aliasing the 2.1 m cascade into noise. +1 LOD bias because box-filtered mips still
+// leak a little past Nyquist.
+layout(location = 0) in vec3 aPos;
+uniform vec3 cameraPosition;   // auto-uploaded by the renderer
+uniform mat4 projectionMatrix;
+uniform mat4 viewMatrix;
+uniform vec4 uLength;
+uniform sampler2D uDisp0;
+uniform sampler2D uDisp1;
+uniform sampler2D uDisp2;
+uniform sampler2D uSlope0;
+uniform sampler2D uSlope1;
+uniform sampler2D uSlope2;
+uniform sampler2D uSlope3;
+uniform float uCellStep;   // radians per sector: cell = r * uCellStep
+uniform float uWind;
+out vec3 vWorld;
+out vec2 vXZ;
+out float vUnresolved;
+// Screen uv and the surface's own view depth are produced HERE, not recovered from
+// gl_FragCoord in the fragment stage. Two reasons: a fragment's [[position]].z is only
+// meaningful when the pass has a depth attachment (the water pass has none, and reading
+// it gave 0), and reconstructing metres from a normalised depth at near=0.5/far=12000
+// throws away the precision that "is the seabed behind this pixel" needs. Interpolated
+// view-space z is exact and free.
+out vec2 vScreenUv;
+out float vViewZ;
+
+vec3 cascadeDisp(vec2 xz, vec3 lod) {
+  return textureLod(uDisp0, xz / uLength.x, max(lod.x, 0.0)).xyz
+       + textureLod(uDisp1, xz / uLength.y, max(lod.y, 0.0)).xyz
+       + textureLod(uDisp2, xz / uLength.z, max(lod.z, 0.0)).xyz;
+}
+
+void main() {
+  vec2 local = aPos.xz;
+  vec2 xz = cameraPosition.xz + local;
+  float cell = max(length(local), 1.0) * uCellStep;
+
+  vec3 d = cascadeDisp(xz, log2(cell * 256.0 / uLength.xyz) + 1.0);
+
+  // Cox-Munk mean square slope minus what the cascades actually carry (each cascade's
+  // 1x1 mip IS its mean square slope): the remainder is sub-texel roughness, and it is
+  // what keeps the horizon from turning into a mirror.
+  vec4 m0 = textureLod(uSlope0, vec2(0.5), 8.0), m1 = textureLod(uSlope1, vec2(0.5), 8.0);
+  vec4 m2 = textureLod(uSlope2, vec2(0.5), 8.0), m3 = textureLod(uSlope3, vec2(0.5), 8.0);
+  vUnresolved = max(0.003 + 0.00512 * uWind - (m0.z + m0.w + m1.z + m1.w + m2.z + m2.w + m3.z + m3.w), 0.0);
+
+  vXZ = xz;
+  vWorld = vec3(xz.x + d.x, d.y, xz.y + d.z);
+  vec4 vp = viewMatrix * vec4(vWorld, 1.0);
+  vViewZ = -vp.z;
+  vec4 clip = projectionMatrix * vp;
+  // row 0 of every render target is the TOP of the frame, so clip +y maps to uv.y 0
+  vScreenUv = vec2(clip.x, -clip.y) * (0.5 / clip.w) + 0.5;
+  gl_Position = clip;
+}#version 300 es
+// water_at.glsl -- the exact surface at a world xz: the choppy displacement moves points
+// horizontally, so the height at q is the height at the point that LANDS on q, which is
+// four fixed-point iterations away (the horizontal displacement is a contraction at the
+// choppiness the spectrum uses).
+uniform sampler2D uDisp0;
+uniform sampler2D uDisp1;
+uniform sampler2D uDisp2;
+uniform vec4 uLength;
+
+vec3 waterDisp(vec2 xz, vec3 lod) {
+  return textureLod(uDisp0, xz / uLength.x, max(lod.x, 0.0)).xyz
+       + textureLod(uDisp1, xz / uLength.y, max(lod.y, 0.0)).xyz
+       + textureLod(uDisp2, xz / uLength.z, max(lod.z, 0.0)).xyz;
+}
+
+vec3 waterAt(vec2 q, vec3 lod) {
+  vec2 p = q;
+  vec3 d = vec3(0.0);
+  for (int i = 0; i < 4; i++) { d = waterDisp(p, lod); p = q - d.xz; }
+  return waterDisp(p, lod);
+}

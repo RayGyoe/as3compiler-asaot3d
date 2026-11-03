@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>glTF 2.0 · asaot3d</title>
+<style>
+  body { margin: 0; background: #0f1115; min-height: 100vh; display: flex; align-items: center; justify-content: center; }
+  canvas { background: #000; image-rendering: pixelated; }
+  /* On web the page IS the window, so the canvas takes the viewport and the stage
+     size follows it (vendor/web_glue.cc's resize seam): the app re-renders at the
+     real size instead of a descriptor-sized bitmap being stretched by the CSS.
+     A page that wants a fixed-size surface drops data-asc-fill and the glue keeps
+     the AIR <width>/<height> box instead. */
+  canvas[data-asc-fill] { position: fixed; inset: 0; width: 100%; height: 100%; }
+</style>
+<style>#asc-loading{position:fixed;inset:0;display:flex;flex-direction:column;gap:10px;align-items:center;justify-content:center;font:15px/1.5 -apple-system,"Helvetica Neue",sans-serif;color:#c9d1d9;background:#0f1115;z-index:9}#asc-loading b{font-size:20px;color:#e6edf3}</style>
+</head>
+<body>
+<div id="asc-loading"><b>glTF 2.0</b><span id="asc-loading-msg">载入中…（wasm 约 3 MB）</span></div>
+<canvas id="canvas" data-asc-fill="1" oncontextmenu="event.preventDefault()"></canvas>
+<script>
+// 页面级错误收集：wasm 加载失败、Promise 抛错都会落到这里，供人和自动化读取
+// （window.__ascErrors）。运行期错误如果只出现在控制台，自动化验收就看不见。
+window.__ascErrors = [];
+window.addEventListener('error', function (ev) { window.__ascErrors.push('error: ' + String(ev.message || ev.error)); });
+window.addEventListener('unhandledrejection', function (ev) { window.__ascErrors.push('unhandled rejection: ' + String(ev.reason)); });
+// 字体字节流 URL（网络加载 + 全量覆盖）：wasm 沙箱无系统字体，这些字体在
+// main() 运行前 fetch 并注入 Skia 的自定义 FreeType 字体管理器。
+var FONT_URLS = ["../fonts/Arial.ttf"];
+var Module = {
+  canvas: document.getElementById('canvas'),
+  // trace() reaches stdout as printf, and these hooks keep it two ways: the
+  // browser console for a human, and window.__ascStdout for automation (the web
+  // verification harness reads assertions from there — a wasm page has no stdout).
+  print: function(line) {
+    (window.__ascStdout || (window.__ascStdout = [])).push(line);
+    console.log(line);
+  },
+  printErr: function(line) {
+    (window.__ascStderr || (window.__ascStderr = [])).push(line);
+    console.error(line);
+  },
+  onRuntimeInitialized: async function() {
+    for (var i = 0; i < FONT_URLS.length; i++) {
+      try {
+        var resp = await fetch(FONT_URLS[i]);
+        if (!resp.ok) throw new Error('HTTP ' + resp.status);
+        var bytes = new Uint8Array(await resp.arrayBuffer());
+        var ptr = Module._malloc(bytes.length);
+        Module.HEAPU8.set(bytes, ptr);
+        Module._sk_fontmgr_register_data(ptr, bytes.length);
+        Module._free(ptr);
+      } catch (e) {
+        console.warn('font load failed: ' + FONT_URLS[i], e);
+      }
+    }
+    // main() ends by calling emscripten_set_main_loop(..., simulateInfiniteLoop=1),
+    // which hands control back to the browser's rAF loop by unwinding the wasm
+    // stack -- its JS implementation returns by throwing the sentinel string
+    // 'unwind'. Emscripten's own run()/callMain() swallows that sentinel, but
+    // this page calls _main() directly from an async function, so an unswallowed
+    // 'unwind' shows up as a bogus "Uncaught (in promise)" in the console (and
+    // would mask any real throw from main()). Swallow exactly that sentinel;
+    // rethrow everything else so genuine failures stay visible.
+    try {
+      Module._main();
+    } catch (e) {
+      if (e !== 'unwind') throw e;
+    }
+  }
+};
+</script>
+<script src="index.js"></script>
+<script>
+(function(){
+  var el = document.getElementById("asc-loading"), msg = document.getElementById("asc-loading-msg");
+  var hide = function(){ if (el) el.style.display = "none"; };
+  if (window.Module && Module.onRuntimeInitialized) {
+    var prev = Module.onRuntimeInitialized;
+    Module.onRuntimeInitialized = function(){ hide(); return prev.apply(this, arguments); };
+  } else { hide(); }
+  setInterval(function(){
+    if (window.__ascErrors && window.__ascErrors.length) { msg.textContent = window.__ascErrors[0]; msg.style.color = "#f85149"; }
+  }, 1000);
+})();
+</script>
+</body>
+</html>
